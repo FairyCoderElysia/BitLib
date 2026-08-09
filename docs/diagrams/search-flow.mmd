@@ -1,0 +1,17 @@
+%% 混合检索流程图：关键词路 + 语义路 → RRF 融合 → CrossEncoder 重排 → 权限兜底 → 结果
+flowchart TD
+    START(["用户输入查询 q + 当前用户可见性<br/>(公开 + 本部门；admin 全量；仅 approved)"])
+    START --> KW["关键词路<br/>jieba 分词 → FTS5 bm25 召回 top30<br/>WHERE status=approved AND 可见性(冗余列)"]
+    START --> SEM["语义路<br/>Embedding(q) → Chroma child 召回 top30<br/>metadata filter: status=approved + 部门 ∈ {公开, 本部门}"]
+
+    KW --> CACHE{"命中热点搜索缓存?<br/>(Redis / 内存 TTL)"}
+    SEM --> CACHE
+    CACHE -- 是 --> HIT[("直接返回缓存结果<br/>不重复全链路计算")]
+    CACHE -- 否 --> RRF["RRF 融合去重<br/>(Reciprocal Rank Fusion, 候选 ~30 条)"]
+
+    RRF --> RERANK["CrossEncoder 重排<br/>(bge-reranker-base)<br/>featured 文档 +1.0 加权"]
+    RERANK --> VCHECK["兜底二次权限校验<br/>(防脏数据, 不可见绝不进入返回)"]
+    VCHECK --> TH{"重排最高分<br/>≥ search_threshold?"}
+    TH -- 否 --> EMPTY["返回空结果<br/>提示: 未找到相关内容"]
+    TH -- 是 --> TOP["取 top5（可配置分页）"]
+    TOP --> OUT["结果卡片<br/>标题/命中摘要高亮/来源/格式/大小/更新时间"]

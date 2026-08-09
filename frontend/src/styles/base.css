@@ -1,0 +1,42 @@
+/* 全局基础样式 */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  /* 字体 / 底色 / 文字色统一走 design-tokens.css（主色 #2b5ce6 全站锁定） */
+  font-family: var(--font-sans);
+  background-color: var(--fill);
+  color: var(--ink-900);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 搜索结果高亮标记（语义高亮，非品牌色，保留） */
+mark {
+  background-color: #ffd666;
+  color: var(--ink-900);
+  padding: 0 1px;
+  border-radius: 2px;
+}
+
+/* 通用页面容器 */
+.page-container {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 20px 16px 40px;
+}
+
+/* 卡片标题 */
+.page-title {
+  margin: 0 0 16px;
+  font-size: 18px;
+  font-weight: 600;
+}

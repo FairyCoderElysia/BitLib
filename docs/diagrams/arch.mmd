@@ -1,0 +1,60 @@
+%% 系统架构图：浏览器 → Nginx → FastAPI 各模块 → SQLite/Redis/Chroma/Ollama（私有化部署，数据不出内网）
+flowchart TB
+    subgraph LAN["企业局域网"]
+        B["浏览器 / Vue3 SPA（frontend/dist）"]
+    end
+
+    subgraph NX["Nginx 反向代理 :80"]
+        N["静态资源托管 + /api 转发 + 200m 上传限"]
+    end
+
+    subgraph BE["FastAPI 后端 :8000（uvicorn）"]
+        direction TB
+        subgraph RT["路由层 routers/"]
+            R1["auth 认证"]
+            R2["documents 上传/预览/下载"]
+            R3["admin 审批/文档管理/用户/推送/审计"]
+            R4["search 混合检索"]
+            R5["qa RAG 问答"]
+            R6["favorites 收藏夹"]
+            R7["crawl 爬虫任务"]
+            R8["notifications 通知"]
+        end
+        subgraph SVC["核心服务层"]
+            S1["parsers / cleaning / chunker / ingest / fts"]
+            S2["search_service 双路召回+RRF"]
+            S3["rag / llm / embeddings / rerank"]
+            S4["vector_store Chroma 封装"]
+            S5["crawler(Scrapling) / scheduler(APScheduler)"]
+            S6["cache(Redis/内存) / audit / visibility(权限过滤)"]
+        end
+    end
+
+    subgraph STORE["数据与模型"]
+        DB[("SQLite data/app.db<br/>业务表 + FTS5 关键词索引")]
+        CH[("Chroma data/chroma<br/>child 向量库")]
+        UP[("data/uploads/<br/>私有文件")]
+        RD[("Redis :6379<br/>热点缓存 · 可选")]
+        OLL["Ollama :11434<br/>qwen2.5 本地 LLM"]
+        MOD["bge-small-zh-v1.5<br/>bge-reranker-base 本地模型"]
+        API["OpenAI 兼容 API<br/>LLM/Embedding · 可选出网"]
+    end
+
+    B -->|"HTTP :80"| N
+    N -->|"/api → 127.0.0.1:8000"| R1
+    N -->|"静态 dist/"| B
+
+    R1 & R2 & R3 & R4 & R5 & R6 & R7 & R8 --> SVC
+
+    S1 --> DB
+    S1 --> CH
+    S1 --> UP
+    S2 --> DB
+    S2 --> CH
+    S3 --> OLL
+    S3 --> MOD
+    S3 --> API
+    S5 --> S1
+    S6 --> RD
+
+    DB -. "WAL + busy_timeout" .- UP

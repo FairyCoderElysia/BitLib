@@ -1,0 +1,16 @@
+%% RAG 问答流程图：问题 → 混合检索召回(权限过滤) → RRF → 重排 → 回溯 parent → 兜底权限过滤 → LLM → 回答+引用
+flowchart TD
+    START(["用户提问 q + 可见性条件<br/>(status=approved 且公开/本部门；admin 全量)"])
+    START --> RECALL["混合检索召回<br/>关键词路 + 语义路（召回阶段即按可见性过滤<br/>不可见内容不进入候选）"]
+    RECALL --> RRF["RRF 融合去重"]
+    RRF --> RERANK["CrossEncoder 重排 → topK child 命中"]
+    RERANK --> PARENT["small-to-big 回溯 parent 上下文块<br/>(~1200 token，同文档合并去重)"]
+
+    PARENT --> GUARD{"二次兜底权限过滤<br/>确认所有 parent 所属文档<br/>approved 且当前用户可见"}
+    GUARD -- 不可见/无内容 --> NOANSWER["明确回答：未在资料库中找到相关内容<br/>（不编造）"]
+    GUARD -- 全部可见 --> PROMPT["组装 prompt<br/>注入『仅基于资料回答 + 禁止编造』"]
+    PROMPT --> LLM{"LLM 双模式"}
+    LLM -->|"local"| OLL["Ollama qwen2.5<br/>本地生成"]
+    LLM -->|"api"| API["OpenAI 兼容 API"]
+    OLL --> ANS
+    API --> ANS["回答 + 引用来源<br/>(document_id + title + snippet + parent_id<br/>可点击跳转原文详情)"]

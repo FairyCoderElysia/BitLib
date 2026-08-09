@@ -1,0 +1,114 @@
+/* ============================================================
+   设计系统 Token（taste-skill 校准 · 企业资料管理系统）
+   设计读法：B 端企业系统 for 内部员工/管理员，
+            专业克制语言，Element Plus 基础 + 定制 token。
+   Dials: VARIANCE 4 / MOTION 3 / DENSITY 6
+   规则：
+   - 单一强调色（深蓝 #2B5CE6，饱和度约 65%，非 AI 蓝紫默认）
+   - 中性色统一 Slate 系，全站不混冷暖灰
+   - 圆角系统统一 6px（形状一致性锁）
+   - 状态色语义化且克制：成功 #10B981 / 警告 #F59E0B / 危险 #EF4444 / 信息 #64748B
+   ============================================================ */
+
+:root {
+  /* ---- 强调色：深蓝（唯一强调色，全站锁定） ---- */
+  --brand: #2b5ce6;
+  --brand-hover: #2249b8;
+  --brand-weak: #eef2fe;
+  --brand-border: #c7d4f8;
+
+  /* ---- 中性色：Slate 系 ---- */
+  --ink-900: #0f172a;   /* 主文字 */
+  --ink-600: #475569;   /* 次级文字 */
+  --ink-400: #94a3b8;   /* 弱化文字/占位 */
+  --line: #e2e8f0;      /* 边框/分隔线 */
+  --fill: #f8fafc;      /* 页面背景 */
+  --fill-2: #f1f5f9;    /* 卡片/表头背景 */
+  --card: #ffffff;
+
+  /* ---- 状态色（语义化，克制使用） ---- */
+  --ok: #10b981;
+  --warn: #f59e0b;
+  --danger: #ef4444;
+  --info: #64748b;
+
+  /* ---- 圆角系统：统一 6px ---- */
+  --radius: 6px;
+  --radius-lg: 10px;
+
+  /* ---- 阴影 ---- */
+  --shadow-sm: 0 1px 2px rgb(15 23 42 / 0.05);
+  --shadow-md: 0 4px 12px rgb(15 23 42 / 0.08);
+  --shadow-lg: 0 12px 32px rgb(15 23 42 / 0.12);
+
+  /* ---- 字体：系统中文字体栈，数字等宽对齐 ---- */
+  --font-sans: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei",
+               "Noto Sans SC", "Segoe UI", system-ui, sans-serif;
+  --font-num: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+
+  /* ---- 间距节奏 ---- */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 24px; --sp-6: 32px; --sp-8: 48px;
+
+  /* ================= Element Plus 主题映射 ================= */
+  --el-color-primary: #2b5ce6;
+  --el-color-primary-light-3: #6e8fef;
+  --el-color-primary-light-5: #9db4f4;
+  --el-color-primary-light-7: #cbd7f9;
+  --el-color-primary-light-8: #e2e9fc;
+  --el-color-primary-light-9: #f0f4fe;
+  --el-color-primary-dark-2: #2249b8;
+  --el-color-success: #10b981;
+  --el-color-warning: #f59e0b;
+  --el-color-danger: #ef4444;
+  --el-color-info: #64748b;
+  --el-border-radius-base: 6px;
+  --el-border-radius-small: 4px;
+  --el-border-radius-round: 999px;
+  --el-border-color: #e2e8f0;
+  --el-border-color-light: #eef2f7;
+  --el-border-color-lighter: #f1f5f9;
+  --el-fill-color-light: #f8fafc;
+  --el-fill-color-lighter: #f1f5f9;
+  --el-text-color-primary: #0f172a;
+  --el-text-color-regular: #334155;
+  --el-text-color-secondary: #64748b;
+  --el-text-color-placeholder: #94a3b8;
+  --el-font-family: var(--font-sans);
+  --el-box-shadow-light: 0 4px 12px rgb(15 23 42 / 0.08);
+}
+
+/* 全局基线：克制、清晰、一致 */
+body {
+  font-family: var(--font-sans);
+  color: var(--ink-900);
+  background: var(--fill);
+  -webkit-font-smoothing: antialiased;
+  margin: 0;
+}
+
+/* 数字等宽（表格/大小/时间列） */
+.num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+
+/* 卡片基线：统一圆角 + 弱阴影 */
+.tk-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+}
+
+/* 状态点（未读/运行中等语义状态，非装饰） */
+.tk-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.tk-dot.ok { background: var(--ok); }
+.tk-dot.warn { background: var(--warn); }
+.tk-dot.danger { background: var(--danger); }
+
+/* 动效克制：仅状态过渡（MOTION 3） */
+.tk-fade-enter-active, .tk-fade-leave-active { transition: opacity .18s ease; }
+.tk-fade-enter-from, .tk-fade-leave-to { opacity: 0; }
+
+/* 减少动态偏好：全部动画关闭 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}

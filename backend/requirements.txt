@@ -1,0 +1,20 @@
+# M1/M2 已使用（均已安装，不新增）
+fastapi
+uvicorn[standard]
+sqlalchemy>=2.0
+pydantic>=2.0
+pydantic-settings
+pyjwt
+bcrypt
+python-multipart
+httpx
+chardet
+
+# 后续 sprint（M3+）再启用，勿在本轮安装
+# python-docx      # M3 解析 docx
+# PyMuPDF          # M3 解析 pdf
+# chromadb         # M3 向量库
+# jieba            # M3 FTS 中文分词
+# sentence-transformers  # M3 本地 embedding（体积大）
+# redis            # M4 可选缓存
+# apscheduler      # M5 爬虫定时

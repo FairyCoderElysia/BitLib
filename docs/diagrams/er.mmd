@@ -1,0 +1,165 @@
+%% 数据模型 ER 图：部门/用户/文档/父子分块/FTS/爬虫/推送/收藏/审计/搜索日志/问答会话
+%% 注：chunk_child 为逻辑实体，实际向量存于 Chroma；document_fts 为 FTS5 虚拟表（external content）
+erDiagram
+    department ||--o{ user : "属于"
+    user ||--o{ document : "上传(uploaded_by)"
+    user ||--o{ document : "审批(approver_id)"
+    document ||--o{ chunk_parent : "分块为"
+    chunk_parent ||--o{ chunk_child : "包含(逻辑,存Chroma)"
+    document ||--o| document_fts : "external content"
+    user ||--o{ favorite_folder : "拥有"
+    favorite_folder ||--o{ favorite : "包含"
+    user ||--o{ favorite : "收藏"
+    document ||--o{ favorite : "被收藏"
+    user ||--o{ crawl_task : "创建"
+    crawl_task ||--o{ crawl_run_log : "产生运行记录"
+    user ||--o{ push_notification : "创建"
+    push_notification ||--o{ push_read : "被阅读"
+    user ||--o{ push_read : "已读"
+    user ||--o{ audit_log : "操作留痕"
+    user ||--o{ search_log : "搜索留痕"
+    user ||--o{ qa_session : "发起"
+    qa_session ||--o{ qa_message : "包含消息"
+
+    department {
+        int id PK
+        string name "部门名,唯一"
+    }
+    user {
+        int id PK
+        string username "登录名,唯一"
+        string password_hash "bcrypt"
+        string role "admin/dept_admin/user"
+        int department_id FK "可空=无部门"
+        datetime created_at
+    }
+    document {
+        int id PK
+        string title
+        string file_name
+        string file_path "私有目录相对路径"
+        string file_type "txt/docx/pdf/md"
+        int file_size "字节"
+        string file_hash "sha256,去重"
+        text content_text "清洗后全文"
+        string status "pending/processing/approved/rejected/offline/failed"
+        boolean is_featured "重点标记,检索加权"
+        int department_id FK "空=公开"
+        string source "upload/crawl"
+        int uploaded_by FK
+        int approver_id FK
+        datetime approved_at
+        text reject_reason
+        text error_message "解析失败原因"
+        datetime created_at
+        datetime updated_at
+    }
+    chunk_parent {
+        int id PK
+        int document_id FK
+        int chunk_index "文档内序号"
+        string title "章节标题"
+        text text "上下文块~1200token"
+    }
+    chunk_child {
+        int id PK
+        int document_id FK "metadata冗余"
+        int parent_id FK "metadata冗余"
+        int chunk_index
+        text text "检索块~250token"
+        vector embedding "512维,存Chroma"
+        int department_id FK "metadata冗余,召回阶段过滤"
+        string status "metadata冗余=approved"
+    }
+    document_fts {
+        int rowid PK "=document.id"
+        string title "jieba空格分词列"
+        text content_text "jieba空格分词列"
+        int department_id "冗余,可见性过滤"
+        string status "冗余,仅approved"
+    }
+    crawl_task {
+        int id PK
+        string name
+        json start_urls
+        json allowed_domains "SSRF白名单"
+        string selector "正文选择器,空=智能提取"
+        int max_depth
+        int target_department_id FK "空=公开"
+        string schedule "cron"
+        boolean enabled
+        string status "idle/running"
+        datetime last_run_at
+        int created_by FK
+        datetime created_at
+    }
+    crawl_run_log {
+        int id PK
+        int task_id FK
+        datetime started_at
+        datetime finished_at
+        int fetched_count
+        int ingested_count
+        int skipped_count "sha256去重跳过"
+        string status "running/success/failed"
+        text error
+    }
+    push_notification {
+        int id PK
+        string title
+        text content
+        int document_id FK "可空=不关联"
+        int department_id FK "空=全员"
+        int created_by FK
+        datetime created_at
+    }
+    push_read {
+        int id PK
+        int notification_id FK
+        int user_id FK
+        datetime read_at
+    }
+    favorite_folder {
+        int id PK
+        int user_id FK
+        string name
+        datetime created_at
+    }
+    favorite {
+        int id PK
+        int user_id FK
+        int folder_id FK "空=未分类"
+        int document_id FK
+        datetime created_at "user+doc唯一"
+    }
+    audit_log {
+        int id PK
+        int user_id FK "操作人,可空"
+        string action "upload/approve/reject/..."
+        string target_type
+        int target_id
+        json detail
+        string ip
+        datetime created_at
+    }
+    search_log {
+        int id PK
+        int user_id FK
+        string query
+        int hit_count
+        datetime created_at
+    }
+    qa_session {
+        int id PK
+        int user_id FK
+        string title "首问摘要"
+        datetime created_at
+    }
+    qa_message {
+        int id PK
+        int session_id FK
+        string role "user/assistant"
+        text content
+        json citations "document_id/title/snippet/parent_id"
+        datetime created_at
+    }

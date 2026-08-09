@@ -1,0 +1,63 @@
+# ============================================================
+# 企业资料管理系统 · Docker Compose
+#
+# 用法：
+#   1) 复制 backend/.env.example 为 backend/.env 并按需修改
+#   2) cd 项目根 && docker compose up -d --build
+#
+# 说明：
+#   - 默认 SQLite 持久化在 backend/data 卷，**不需要 PostgreSQL**；
+#     DATABASE_URL 保持 sqlite:///./data/app.db 即可。
+#   - redis 服务默认注释：需要 Redis 热点缓存时取消注释，并设置
+#     REDIS_URL=redis://redis:6379/0；不启用时后端自动降级为内存 TTL 缓存。
+#   - backend 镜像需项目内提供 Dockerfile（或在 image 字段指定预构建镜像名）。
+#   - data 卷覆盖 backend/data/（app.db + uploads/ + chroma/），
+#     备份 = 备份该卷 / 容器内 /app/data 目录（可配合 backend/scripts/backup.py）。
+# ============================================================
+
+services:
+  backend:
+    # 方式 A：本地构建（需 backend/Dockerfile 位于 backend/ 目录）
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    # 方式 B：使用预构建镜像（取消下行注释并指定镜像名，同时注释 build 段）
+    # image: enterprise-doc-backend:latest
+    container_name: edoc-backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      # 容器内 data 目录由卷持久化（覆盖 .env 中的相对路径，保证落盘）
+      DATABASE_URL: sqlite:////app/data/app.db
+      UPLOAD_DIR: /app/data/uploads
+      CHROMA_DIR: /app/data/chroma
+    volumes:
+      - edoc_data:/app/data
+    ports:
+      - "8000:8000"
+    command: >
+      sh -c "uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    # 需要 Redis 时依赖 redis 服务
+    # depends_on:
+    #   - redis
+
+  # ---------- 可选：Redis 热点缓存 ----------
+  # 启用步骤：取消下方注释 → .env 设置 REDIS_URL=redis://redis:6379/0
+  # 未启用时后端自动降级为内存 TTL 缓存，功能不受影响。
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: edoc-redis
+  #   restart: unless-stopped
+  #   volumes:
+  #     - edoc_redis:/data
+  #   ports:
+  #     - "6379:6379"
+  #   command: redis-server --appendonly yes
+
+volumes:
+  edoc_data:
+    # 持久化 backend/data/：app.db + uploads/（私有文件）+ chroma/（向量库）
+    name: edoc_data
+  # edoc_redis:
+  #   name: edoc_redis

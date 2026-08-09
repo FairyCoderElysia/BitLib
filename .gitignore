@@ -1,0 +1,29 @@
+# ===== 环境与密钥（绝不推送）=====
+backend/.env
+*.env.local
+.env
+
+# ===== 运行时数据（隐私：数据库/上传文件/向量库/备份）=====
+backend/data/
+backup/
+
+# ===== 依赖与构建产物 =====
+frontend/node_modules/
+frontend/dist/
+__pycache__/
+*.pyc
+*.pyo
+
+# ===== 开发工具产物（含页面截图/会话元数据）=====
+.playwright-mcp/
+.reasonix/
+contracts/
+eval-reports/
+spec-review.md
+
+# ===== 系统文件 =====
+.DS_Store
+Thumbs.db
+*.log
+# codegraph 索引（开发工具产物）
+.codegraph/

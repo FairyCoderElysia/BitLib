@@ -1,0 +1,147 @@
+# -*- coding: utf-8 -*-
+"""混合检索（spec §6.3 / F3）：关键词(FTS bm25) + 语义(Chroma) 双路召回 → RRF 融合 → 重排。
+
+- 双路均在召回阶段按可见性过滤（FTS 冗余列 / Chroma metadata），不可见文档不进入后续计算
+- 重排后做兜底权限校验（防脏数据）
+"""
+import logging
+from typing import Optional
+
+import jieba
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from . import models
+from .config import settings
+from .embeddings import embed
+from .rerank import rerank
+from .vector_store import query as vector_query
+
+logger = logging.getLogger(__name__)
+
+RRF_K = 60
+RECALL_TOP_K = 30
+
+
+def keyword_recall(db: Session, user: models.User, query: str, top_k: int = RECALL_TOP_K) -> list[int]:
+    """关键词路：jieba 分词 → FTS5 MATCH → bm25 排序 → 可见性过滤（冗余列）。
+
+    admin 角色不限部门（spec：管理员可见全部文档）；普通用户限 公开+本部门。
+    """
+    tokens = [t for t in jieba.cut_for_search(query) if t.strip() and len(t.strip()) > 1]
+    if not tokens:
+        return []
+    match = " OR ".join(tokens)
+    # 部门过滤：admin 跳过（历史 bug：admin department_id 为 None 时被限成仅公开文档）
+    if user.role == models.ROLE_ADMIN:
+        dept_clause = ""
+    else:
+        dept_list = [""]
+        if user.department_id is not None:
+            dept_list.append(str(user.department_id))
+        placeholders = ",".join(f"'{d}'" for d in dept_list)  # 可信值（int/常量）
+        dept_clause = f"AND department_id IN ({placeholders}) "
+    sql = (
+        "SELECT rowid FROM document_fts "
+        "WHERE document_fts MATCH :kw AND status = 'approved' " +
+        dept_clause +
+        "ORDER BY bm25(document_fts) LIMIT :lim"
+    )
+    params = {"kw": match, "lim": top_k}
+    try:
+        rows = db.execute(text(sql), params).fetchall()
+    except Exception as exc:  # FTS 特殊字符等导致 MATCH 语法错误 → 降级空召回
+        logger.warning("FTS 查询失败（query=%r）: %s", query, exc)
+        return []
+    return [r[0] for r in rows]
+
+
+def semantic_recall(db: Session, user: models.User, query: str, top_k: int = RECALL_TOP_K) -> list[dict]:
+    """语义路：Embedding → Chroma 召回（metadata 可见性过滤）。返回含 parent_id 的命中。"""
+    emb = embed([query])[0]
+    return vector_query(emb, top_k,
+                        user_department_id=user.department_id,
+                        is_admin=user.role == models.ROLE_ADMIN)
+
+
+def rrf_fuse(ranked_lists: list[list[int]], k: int = RRF_K) -> list[tuple[int, float]]:
+    """Reciprocal Rank Fusion：多路召回按秩融合。"""
+    scores: dict[int, float] = {}
+    for ranked in ranked_lists:
+        for rank, doc_id in enumerate(ranked):
+            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank + 1)
+    return sorted(scores.items(), key=lambda x: -x[1])
+
+
+def _snippet(text: str, query: str, width: int = 120) -> str:
+    """命中摘要片段：定位第一个查询词附近，否则取开头。"""
+    q = query.strip()
+    if q:
+        idx = text.find(q)
+        if idx >= 0:
+            start = max(0, idx - width // 2)
+            return text[start:start + width * 2].replace("\n", " ")
+    return text[:width * 2].replace("\n", " ")
+
+
+def hybrid_search(db: Session, user: models.User, query: str,
+                  top_k: int = RECALL_TOP_K, limit: int = 5,
+                  scorer=None) -> list[dict]:
+    """混合检索主流程。返回 [{document, snippet, score, matched}] 按相关度排序。"""
+    if not query.strip():
+        return []
+
+    kw_ids = keyword_recall(db, user, query, top_k)
+    sem_hits = semantic_recall(db, user, query, top_k)
+    sem_ids = [h["document_id"] for h in sem_hits]
+
+    # 语义相似度阈值（spec F3）：关键词 0 命中且语义最高相似度低于阈值 → 未找到
+    max_sem = max((1.0 - h["distance"] for h in sem_hits), default=-1.0)
+    if not kw_ids and max_sem < settings.search_threshold:
+        return []
+
+    # RRF 融合
+    fused = rrf_fuse([kw_ids, sem_ids])
+
+    # 组装候选（重排文本用 content_text 前段；parent 回溯信息来自语义命中）
+    parent_by_doc: dict[int, int] = {}
+    for h in sem_hits:
+        parent_by_doc.setdefault(h["document_id"], h["parent_id"])
+
+    candidates = []
+    for doc_id, rrf in fused[: max(limit * 4, 20)]:
+        doc = db.get(models.Document, doc_id)
+        if doc is None or doc.status != models.STATUS_APPROVED:
+            continue
+        if not _dept_visible_after(user, doc):  # 兜底权限校验
+            continue
+        candidates.append({
+            "document_id": doc.id,
+            "title": doc.title,
+            "text": (doc.content_text or "")[:800],
+            "rrf": rrf,
+            "is_featured": doc.is_featured,
+            "doc": doc,
+            "parent_id": parent_by_doc.get(doc.id, 0),
+        })
+
+    ranked = rerank(query, candidates, limit=limit, scorer=scorer)
+
+    results = []
+    for c in ranked:
+        results.append({
+            "document": c["doc"],
+            "score": c["score"],
+            "snippet": _snippet(c["text"], query),
+            "matched": None,
+        })
+    return results
+
+
+def _dept_visible_after(user: models.User, doc: models.Document) -> bool:
+    """兜底可见性校验（等价 dept_visible，避免循环 import）。"""
+    if user.role == models.ROLE_ADMIN:
+        return True
+    if doc.department_id is None:
+        return True
+    return doc.department_id == user.department_id
