@@ -31,7 +31,7 @@
               <span v-if="n.document_id" class="doc-link">关联文档可查看</span>
             </div>
           </div>
-          <el-button v-if="!n.is_read" size="small" @click.stop="handleRead(n)">标为已读</el-button>
+          <el-button v-if="!n.is_read" size="small" @click.stop="markRead(n)">标为已读</el-button>
         </div>
 
         <div v-if="total > pageSize" class="pagination-wrap">
