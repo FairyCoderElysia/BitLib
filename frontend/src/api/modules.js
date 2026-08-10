@@ -87,6 +87,9 @@ export const adminApi = {
   reprocess(id) {
     return unwrap(http.post(`/admin/documents/${id}/reprocess`))
   },
+  regenerateSummary(id) {
+    return unwrap(http.post(`/admin/documents/${id}/regenerate-summary`))
+  },
   /** 爬虫任务列表（分页） */
   crawlTasks(params) {
     return unwrap(http.get('/admin/crawl-tasks', { params }))

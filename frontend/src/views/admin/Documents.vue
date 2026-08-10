@@ -106,6 +106,9 @@
                 <el-button size="small">更多<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
                 <template #dropdown>
                   <el-dropdown-menu>
+                    <el-dropdown-item v-if="row.status === 'approved'" command="summary" :icon="DocumentCopy">
+                      重新生成摘要
+                    </el-dropdown-item>
                     <el-dropdown-item command="dept" :icon="OfficeBuilding">改部门</el-dropdown-item>
                     <el-dropdown-item command="delete" :icon="Delete" divided>删除</el-dropdown-item>
                   </el-dropdown-menu>
@@ -212,7 +215,7 @@ import http from '@/api/http'
 import PreviewDocument from '@/components/PreviewDocument.vue'
 import {
   Upload, Refresh, View, Star, StarFilled, RefreshRight, ArrowDown,
-  OfficeBuilding, Delete, UploadFilled,
+  OfficeBuilding, Delete, UploadFilled, DocumentCopy,
 } from '@element-plus/icons-vue'
 import {
   FILE_TYPE_LABEL, FILE_TYPE_TAG, SOURCE_LABEL,
@@ -335,12 +338,30 @@ function openPreview(row) {
 
 /** 更多操作：改部门 / 删除 */
 function onMoreCommand(cmd, row) {
-  if (cmd === 'dept') {
+  if (cmd === 'summary') {
+    handleRegenSummary(row)
+  } else if (cmd === 'dept') {
     deptDoc.value = row
     newDeptId.value = row.department_id
     deptVisible.value = true
   } else if (cmd === 'delete') {
     handleDelete(row)
+  }
+}
+
+/** 重新生成摘要（F17）：approved 文档单独重跑 generate_summary */
+async function handleRegenSummary(row) {
+  try {
+    await ElMessageBox.confirm(`重新生成「${row.title}」的摘要？将调用 AI 重新概括（未配置 AI 时截取开头片段）。`, '重新生成摘要', { type: 'info' })
+  } catch (e) {
+    return
+  }
+  try {
+    const res = await adminApi.regenerateSummary(row.id)
+    ElMessage.success('摘要已更新')
+    await fetchList()
+  } catch (e) {
+    /* 拦截器已提示 */
   }
 }
 

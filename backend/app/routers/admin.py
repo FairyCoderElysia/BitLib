@@ -173,6 +173,34 @@ def reprocess_document(document_id: int,
                        "error_message": doc.error_message})
 
 
+@router.post("/documents/{document_id}/regenerate-summary")
+def regenerate_summary(document_id: int,
+                       request: Request,
+                       db: Session = Depends(get_db),
+                       current_user: models.User = Depends(require_dept_admin)):
+    """重新生成摘要（F17 补充）：对 approved 文档单独重跑 generate_summary，不动入库管线。
+
+    - admin 任意文档；dept_admin 仅本部门
+    - LLM 不可用时自动降级为片段截取（generate_summary 内部兜底）
+    """
+    doc = db.get(models.Document, document_id)
+    if doc is None:
+        raise not_found("文档不存在")
+    if current_user.role == models.ROLE_DEPT_ADMIN and \
+            doc.department_id != current_user.department_id:
+        raise forbidden("无权操作其他部门的文档")
+    if doc.status != models.STATUS_APPROVED or not doc.content_text:
+        raise bad_request("仅已入库（approved）且有正文的文档可重新生成摘要")
+    from ..summary import generate_summary
+    doc.summary = generate_summary(db, doc)
+    db.add(doc)
+    db.commit()
+    log_action(db, current_user, "regenerate_summary", "document", doc.id,
+               {"file_name": doc.file_name, "summary_len": len(doc.summary or "")},
+               client_ip(request))
+    return schemas.ok({"id": doc.id, "summary": doc.summary})
+
+
 class DocumentPatch(BaseModel):
     """文档管理操作（F8）：标记重点 / 下架 / 重新上架 / 改部门。"""
     is_featured: Optional[bool] = None
