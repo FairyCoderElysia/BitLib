@@ -27,3 +27,8 @@ Thumbs.db
 *.log
 # codegraph 索引（开发工具产物）
 .codegraph/
+
+# 用户要求不推送（docs 设计文档 / spec / 项目总结）
+docs/
+spec.md
+PROJECT_SUMMARY.md

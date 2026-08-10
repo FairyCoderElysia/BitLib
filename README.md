@@ -94,17 +94,6 @@
 
 ```
 E:\毕业论文\
-├─ spec.md                    # 产品规格（功能/数据模型/API 契约）
-├─ spec-review.md             # 需求评审记录
-├─ docs/
-│  ├─ DESIGN.md               # 技术设计 v4（架构/流程/部署）
-│  └─ diagrams/               # 论文图表素材（mermaid 源，可贴 mermaid.live 渲染）
-│     ├─ arch.mmd             # 系统架构图
-│     ├─ er.mmd               # 数据模型 ER 图
-│     ├─ approval-flow.mmd    # 上传审批时序图
-│     ├─ search-flow.mmd      # 混合检索流程图
-│     ├─ rag-flow.mmd         # RAG 问答流程图
-│     └─ deploy.mmd           # 私有化部署拓扑图
 ├─ backend/
 │  ├─ app/
 │  │  ├─ main.py              # FastAPI 入口（lifespan 建表播种/预热/路由/异常）
@@ -139,7 +128,6 @@ E:\毕业论文\
 ├─ contracts/                 # 各里程碑契约与交付摘要
 ├─ eval-reports/              # Evaluator 评估报告
 ├─ docker-compose.yml         # Docker Compose（可选 redis，默认 SQLite 无需 postgres）
-└─ PROJECT_SUMMARY.md         # 项目总结（harness Phase 3）
 ```
 
 ---
@@ -345,7 +333,6 @@ EMBEDDING_DIM=1536              # 必须与向量库现有维度一致！
 
 | 文档 | 内容 |
 |---|---|
-| `spec.md` | 产品规格：功能需求（P0/P1/P2）、数据模型、API 契约、验收标准 |
-| `docs/DESIGN.md` | 技术设计 v4：架构选型、数据模型、核心流程、里程碑 |
-| `PROJECT_SUMMARY.md` | 项目总结：功能清单、测试统计、修复记录、论文素材索引 |
-| `docs/diagrams/*.mmd` | 论文图表素材（架构/ER/时序/流程/拓扑），可直接粘贴 mermaid.live 渲染 |
+| `README.md` | 部署与使用指南（本文件） |
+| `backend/.env.example` | 环境配置模板（复制为 .env 使用） |
+| `backend/scripts/backup.py` | 数据备份脚本 |
