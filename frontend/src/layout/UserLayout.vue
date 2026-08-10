@@ -50,6 +50,7 @@
             <el-dropdown-menu>
               <el-dropdown-item disabled>角色：{{ roleText }}</el-dropdown-item>
               <el-dropdown-item command="favorites" :icon="Star">我的收藏</el-dropdown-item>
+              <el-dropdown-item command="my-uploads" :icon="UploadFilled">我的上传</el-dropdown-item>
               <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
             </el-dropdown-menu>
           </template>
@@ -67,7 +68,7 @@
 <script setup>
 import { onMounted, onUnmounted, ref, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { DataBoard, ChatDotRound, Star } from '@element-plus/icons-vue'
+import { DataBoard, ChatDotRound, Star, UploadFilled } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 import { notifApi } from '@/api/modules'
 
@@ -103,6 +104,8 @@ async function fetchUnread() {
 function onCommand(cmd) {
   if (cmd === 'favorites') {
     router.push('/favorites')
+  } else if (cmd === 'my-uploads') {
+    router.push('/my-uploads')
   } else if (cmd === 'logout') {
     userStore.logout()
     router.push('/login')

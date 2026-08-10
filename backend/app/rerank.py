@@ -40,7 +40,7 @@ def rerank(query: str, candidates: list[dict], limit: int = 5,
     if not candidates:
         return []
 
-    if not settings.reranker_enabled or settings.llm_mode == "api":
+    if not settings.reranker_enabled:
         # 跳过 cross-encoder：按 RRF + featured 排序
         for c in candidates:
             c["score"] = c.get("rrf", 0.0) + (1.0 if c.get("is_featured") else 0.0)

@@ -13,10 +13,25 @@
           :class="{ active: s.id === sessionId }"
           @click="selectSession(s.id)"
         >
-          <div class="session-title">{{ s.title }}</div>
-          <div class="session-preview">{{ s.last_preview }}</div>
+          <div class="session-info">
+            <div class="session-title">{{ s.title }}</div>
+            <div class="session-preview">{{ s.last_preview }}</div>
+          </div>
+          <el-icon class="session-del" title="删除会话" @click.stop="handleDeleteSession(s)">
+            <Close />
+          </el-icon>
         </div>
         <el-empty v-if="!sessionsLoading && !sessions.length" description="暂无历史会话" :image-size="60" />
+        <el-button
+          v-if="sessions.length"
+          size="small"
+          plain
+          type="danger"
+          class="clear-btn"
+          @click="handleClearSessions"
+        >
+          清空全部会话
+        </el-button>
       </div>
     </aside>
 
@@ -80,7 +95,8 @@
 <script setup>
 import { ref, nextTick, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { Plus } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Plus, Close } from '@element-plus/icons-vue'
 import { qaApi } from '@/api/modules'
 
 const router = useRouter()
@@ -130,6 +146,40 @@ async function selectSession(id) {
   } finally {
     loading.value = false
     scrollToBottom()
+  }
+}
+
+/** 删除单条会话（F21） */
+async function handleDeleteSession(s) {
+  try {
+    await ElMessageBox.confirm(`删除会话「${s.title}」？`, '删除确认', { type: 'warning' })
+  } catch (e) {
+    return
+  }
+  try {
+    await qaApi.deleteSession(s.id)
+    if (sessionId.value === s.id) newSession()
+    await fetchSessions()
+    ElMessage.success('已删除')
+  } catch (e) {
+    /* 拦截器已提示 */
+  }
+}
+
+/** 清空全部会话（F21） */
+async function handleClearSessions() {
+  try {
+    await ElMessageBox.confirm('确定清空全部问答会话？此操作不可恢复。', '清空确认', { type: 'warning' })
+  } catch (e) {
+    return
+  }
+  try {
+    const res = await qaApi.clearSessions()
+    newSession()
+    await fetchSessions()
+    ElMessage.success(`已清空 ${res.deleted || 0} 条会话`)
+  } catch (e) {
+    /* 拦截器已提示 */
   }
 }
 
@@ -217,6 +267,25 @@ onMounted(() => {
   border-radius: var(--radius);
   cursor: pointer;
   border: 1px solid transparent;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.session-info {
+  flex: 1;
+  min-width: 0;
+}
+.session-del {
+  color: var(--ink-400);
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.session-del:hover {
+  color: var(--danger);
+}
+.clear-btn {
+  width: 100%;
+  margin-top: 4px;
 }
 .session-item:hover {
   background: var(--fill-2);

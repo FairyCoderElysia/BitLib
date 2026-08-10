@@ -159,6 +159,14 @@ export const qaApi = {
   getMessages(sessionId) {
     return unwrap(http.get(`/qa/sessions/${sessionId}/messages`))
   },
+  /** 删除单条会话（F21） */
+  deleteSession(sessionId) {
+    return unwrap(http.delete(`/qa/sessions/${sessionId}`))
+  },
+  /** 清空全部会话（F21） */
+  clearSessions() {
+    return unwrap(http.delete('/qa/sessions'))
+  },
 }
 
 // ---------------- 收藏夹 / 收藏 ----------------

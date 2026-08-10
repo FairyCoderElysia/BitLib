@@ -170,3 +170,32 @@ def session_messages(session_id: int,
             "citations": m.citations or [],
         } for m in msgs],
     })
+
+
+@router.delete("/sessions/{session_id}")
+def delete_session(session_id: int,
+                   db: Session = Depends(get_db),
+                   user: models.User = Depends(get_current_user)):
+    """删除单条会话（F21 收尾）：级联删除其消息，仅本人。"""
+    session = db.get(models.QASession, session_id)
+    if session is None or session.user_id != user.id:
+        raise bad_request("会话不存在或无权访问")
+    db.query(models.QAMessage).filter(models.QAMessage.session_id == session_id).delete()
+    db.delete(session)
+    db.commit()
+    return schemas.ok({"deleted": session_id})
+
+
+@router.delete("/sessions")
+def clear_sessions(db: Session = Depends(get_db),
+                   user: models.User = Depends(get_current_user)):
+    """清空本人全部会话（F21 收尾）。"""
+    ids = [s.id for s in db.query(models.QASession).filter(
+        models.QASession.user_id == user.id).all()]
+    if ids:
+        db.query(models.QAMessage).filter(models.QAMessage.session_id.in_(ids)).delete(
+            synchronize_session=False)
+        db.query(models.QASession).filter(models.QASession.user_id == user.id).delete(
+            synchronize_session=False)
+        db.commit()
+    return schemas.ok({"deleted": len(ids)})
