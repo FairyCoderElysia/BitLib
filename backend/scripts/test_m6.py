@@ -192,6 +192,25 @@ def main():
                 assert r.json()["data"]["items"] == [], r.text
             check("9. suggest 空 q / 纯空格返回空数组，HTTP 200")
 
+            # ---------- 10. 改部门/下架后 suggest 缓存失效（eval-6 残留建议） ----------
+            # 先让 mkt 标题进入缓存（admin 搜"市"）
+            r = c.get("/api/search/suggest", params={"q": "市"}, headers=H(token_admin))
+            assert r.status_code == 200 and any(
+                i["title"] == "市场部产品推广方案" for i in r.json()["data"]["items"]), r.text
+            # 第二次命中缓存
+            r = c.get("/api/search/suggest", params={"q": "市"}, headers=H(token_admin))
+            assert r.json()["data"].get("cached") is True, r.text
+            # 下架市场部文档
+            r = c.patch(f"/api/admin/documents/{mkt_id}", headers=H(token_admin),
+                        json={"status": "offline"})
+            assert r.status_code == 200, r.text
+            # 再次联想：缓存命中路径应剔除已下架文档
+            r = c.get("/api/search/suggest", params={"q": "市"}, headers=H(token_admin))
+            assert r.status_code == 200, r.text
+            titles = [i["title"] for i in r.json()["data"]["items"]]
+            assert "市场部产品推广方案" not in titles, f"缓存未失效: {titles}"
+            check("10. 文档下架后 suggest 缓存命中不再返回该标题（可见性兜底生效）")
+
         print(f"\n=== ALL {len(passed)} M6 TESTS PASSED ===")
     finally:
         shutil.rmtree(TEST_ROOT, ignore_errors=True)

@@ -36,6 +36,31 @@ HOT_WORDS_WINDOW_DAYS = 30             # 近 30 天搜索日志窗口
 STOP_WORDS = frozenset(
     "的了是在我有和就都而及与或一个上也很到说要去你会着没有看好不那等"
 )
+# 常见双字噪声词（F20 热词质量优化，eval-6 残留建议）
+STOP_WORDS_2 = frozenset(
+    "如何 我们 你们 他们 这个 那个 什么 怎么 为什么 请问 介绍 需要 可以 应该 是否 "
+    "已经 还是 不过 但是 因为 所以 如果 虽然 然后 之后 之前 关于 对于 以及 通过 "
+    "进行 使用 一个 一些 一种 可能 没有 不是 不会 不能 知道 了解 查看 查找 怎样 "
+    "哪些 哪个 里面 上面 下面 时候 地方 问题 情况 方法 方式 步骤 流程 内容 信息 "
+    "功能 管理 搜索 查询 下载 上传 查看 编辑 删除 添加 设置 配置 提供 支持 包括 "
+    "需要 要求 说明 处理 操作 进入 打开 显示 返回 当前 全部 所有 相关 其他 各种 "
+    "不同 主要 基本 具体 建议 方案 计划 目标 结果 效果 影响 数据 模型 算法 服务 "
+    "平台 版本 状态 类型 名称 地址 时间 日期 数量 大小 范围 部分 方面 领域 方向 "
+    "列表 页面 界面 按钮 窗口 提示 错误 成功 失败 正常 异常 有效 无效 能够 必须 "
+    "非常 比较 相当 更加 特别 完全 很多 大量 少数 个别 相同 相似 另外 此外 同时 "
+    "现在 目前 未来 过去 今天 明天 昨天 今年 明年 去年 每周 每天 每年 一次 两次 "
+    "多次 首次 再次 开头 中间 结尾 前面 后面 左边 右边 内部 外部 本地 远程 线上 "
+    "线下 正式 临时 永久 默认 自定义 手动 自动 批量 单个 新增 更新 统计 分析 导出 "
+    "导入 打印 保存 取消 确认 提交 刷新 加载 等待 完成 开始 结束 暂停 继续 停止 "
+    "启动 关闭 连接 断开 登录 注册 退出 密码 账号 用户名 邮箱 手机 验证码 忘记 "
+    "记住 同意 拒绝 接受 忽略 跳过 下一步 上一步 首页 上一页 下一页 最后 第一 "
+    "第二 第三 每个 任意 某个 别的 更多 更少 更大 更小 更高 更低 更快 更慢 更好 "
+    "更差 尤其 特别 甚至 几乎 大约 大概 左右 上下 前后 附近 周围 旁边 中间 中心 "
+    "边缘 角落 顶部 底部 左侧 右侧 中部 里面 外面 以后 以前 最近 最新 最早 首先 "
+    "其次 还有 以及 或者 就是 只是 可是 然而 因此 由于 如果 假如 假设 即使 尽管 "
+    "无论 不管 除非 只要 只有 既然 与其 宁可 宁愿 只好 只能 不必 无需 不用 谢谢 "
+    "抱歉 没关系 好的 嗯 啊 哦 唉 呀 呢 吧 嘛 啦"
+)
 
 
 def _document_snapshot(doc: models.Document) -> dict:
@@ -146,7 +171,7 @@ def _is_junk_word(word: str) -> bool:
     """热词过滤：单字 / 停用词 / 纯数字或纯符号丢弃（保留中文/字母词条）。"""
     if len(word) < 2:
         return True
-    if word in STOP_WORDS:
+    if word in STOP_WORDS or word in STOP_WORDS_2:
         return True
     # 不含任何字母或汉字（纯数字、纯符号、纯空白）视为噪声
     if not any(ch.isalpha() for ch in word):
@@ -250,10 +275,11 @@ def suggest(
             seen.add(doc.title)
             items.append({"id": doc.id, "title": doc.title})
 
-    # 前缀命中优先，不足用包含命中补齐
-    _append(base.filter(models.Document.title.like(f"{q}%")).all())
+    # 前缀命中优先，不足用包含命中补齐（转义 %/_ 通配符，eval-6 残留建议）
+    escaped_q = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    _append(base.filter(models.Document.title.like(f"{escaped_q}%", escape="\\")).all())
     if len(items) < page_size:
-        _append(base.filter(models.Document.title.like(f"%{q}%")).all())
+        _append(base.filter(models.Document.title.like(f"%{escaped_q}%", escape="\\")).all())
 
     # 空结果不缓存：避免新增/可见文档后联想仍命中空缓存（缓存污染）
     if items:
