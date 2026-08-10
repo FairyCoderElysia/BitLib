@@ -101,6 +101,7 @@ def crawl_run_log_to_dict(log) -> dict:
         "finished_at": log.finished_at,
         "fetched_count": log.fetched_count,
         "ingested_count": log.ingested_count,
+        "updated_count": log.updated_count,
         "skipped_count": log.skipped_count,
         "status": log.status,
         "error": log.error,

@@ -71,6 +71,7 @@ class Document(Base):
     file_type = Column(String(16), nullable=False)    # txt/docx/pdf/md
     file_size = Column(Integer, default=0)            # 字节
     file_hash = Column(String(64), nullable=False, index=True)  # sha256
+    source_url = Column(String(512), nullable=True, index=True)  # 爬虫入库页面 URL（F22，上传恒为 NULL）
     content_text = Column(Text, default="")           # 清洗后全文（M3 填充）
     summary = Column(Text, nullable=True)             # 智能摘要（P2 占位）
     status = Column(String(16), nullable=False, default=STATUS_PENDING, index=True)
@@ -160,6 +161,7 @@ class CrawlRunLog(Base):
     finished_at = Column(DateTime, nullable=True)
     fetched_count = Column(Integer, default=0)
     ingested_count = Column(Integer, default=0)
+    updated_count = Column(Integer, default=0)        # F22：同 URL 内容变化走更新
     skipped_count = Column(Integer, default=0)
     status = Column(String(16), default="running")  # running/success/failed
     error = Column(Text, nullable=True)

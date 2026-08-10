@@ -39,6 +39,9 @@
                   <el-table-column label="入库" prop="ingested_count" width="70" align="center">
                     <template #default="{ row: l }"><span class="num">{{ l.ingested_count }}</span></template>
                   </el-table-column>
+                  <el-table-column label="更新" prop="updated_count" width="70" align="center">
+                    <template #default="{ row: l }"><span class="num">{{ l.updated_count }}</span></template>
+                  </el-table-column>
                   <el-table-column label="跳过" prop="skipped_count" width="70" align="center">
                     <template #default="{ row: l }"><span class="num">{{ l.skipped_count }}</span></template>
                   </el-table-column>
@@ -288,7 +291,7 @@ async function handleRun(row) {
     const res = await adminApi.runCrawlTask(row.id)
     const parts = [
       `状态：${RUN_STATUS_LABEL[res.status] || res.status}`,
-      `抓取 ${res.fetched_count} · 入库 ${res.ingested_count} · 跳过 ${res.skipped_count}`,
+      `抓取 ${res.fetched_count} · 入库 ${res.ingested_count} · 更新 ${res.updated_count} · 跳过 ${res.skipped_count}`,
       res.error ? `错误：${res.error}` : '',
     ].filter(Boolean).join('\n')
     ElMessageBox.alert(parts, `执行结果：${row.name}`, { confirmButtonText: '知道了' })

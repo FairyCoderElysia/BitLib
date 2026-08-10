@@ -130,11 +130,37 @@ def _seed_defaults():
         return password
 
 
+def _migrate_columns() -> None:
+    """对已存在的表执行幂等 ALTER（Sprint 8 新增列，兼容老库）。
+
+    - document.source_url（VARCHAR(512)，可空）：SQLite ALTER 仅允许追加可空/带默认列，满足；
+      索引不随 ALTER 创建，需单独 CREATE INDEX IF NOT EXISTS（与 models 声明的 index 同名幂等）。
+    - crawl_run_log.updated_count（INTEGER DEFAULT 0）：同上。
+    - 全新库由 create_all 直接建列，PRAGMA 检查命中即跳过；异常降级警告，不阻塞启动。
+    """
+    try:
+        with engine.begin() as conn:
+            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(document)")).fetchall()]
+            if "source_url" not in cols:
+                conn.execute(text("ALTER TABLE document ADD COLUMN source_url VARCHAR(512)"))
+                logger.info("迁移：document 增加 source_url 列")
+            cols2 = [r[1] for r in conn.execute(text("PRAGMA table_info(crawl_run_log)")).fetchall()]
+            if "updated_count" not in cols2:
+                conn.execute(text("ALTER TABLE crawl_run_log ADD COLUMN updated_count INTEGER DEFAULT 0"))
+                logger.info("迁移：crawl_run_log 增加 updated_count 列")
+        with engine.begin() as conn:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_document_source_url ON document(source_url)"))
+    except Exception as exc:  # 表缺失等场景：降级警告，不阻塞启动
+        logger.warning("Sprint8 迁移列失败（降级继续）：%s", exc)
+
+
 def init_db() -> str | None:
-    """初始化：建目录 → 建表（含 FTS）→ 播种。返回首次 admin 初始密码。"""
+    """初始化：建目录 → 建表（含 FTS）→ 老库补列 → 播种。返回首次 admin 初始密码。"""
     from . import models  # noqa: F401  确保模型已注册到 Base.metadata
 
     _ensure_dirs()
     Base.metadata.create_all(bind=engine)
+    _migrate_columns()
     _create_fts_table()
     return _seed_defaults()

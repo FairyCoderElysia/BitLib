@@ -4,8 +4,10 @@
 - fetch_page：Scrapling Fetcher.get 优先，StealthyFetcher 兜底（反爬）
 - extract_text：配置 selector 时取 CSS 选中元素文本，否则 BeautifulSoup 整页正文
 - extract_links：提取页面链接并按域名白名单过滤（SSRF 防护）
-- run_crawl_task：任务主流程——BFS 按 max_depth 抓取 → 清洗 → sha256 去重
-  → 直接入库（ingest_text，不走审批）→ CrawlRunLog + 审计
+- run_crawl_task：任务主流程——BFS 按 max_depth 抓取 → 清洗 → 增量三分支（F22）：
+  新增（URL 无记录）/ 更新（同 URL 内容变化，复用 ingest_text 走完整清理管线）
+  / 跳过（sha256 内容级去重）→ 直接入库（ingest_text，不走审批）
+  → CrawlRunLog（fetched/ingested/updated/skipped）+ 审计
 """
 import hashlib
 import logging
@@ -179,7 +181,7 @@ def _do_run(db, task, user):
     db.commit()
     db.refresh(run_log)
 
-    fetched = ingested = skipped = 0
+    fetched = ingested = updated = skipped = 0
     errors = []
     try:
         start_urls = [str(u) for u in (task.start_urls or []) if u]
@@ -218,32 +220,56 @@ def _do_run(db, task, user):
                 skipped += 1  # 过短拦截（spec §7 F7：清洗后 <50 字符不入库）
             else:
                 sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                # 分支一：内容级去重（sha256 命中，含跨 URL 镜像页，沿用 M5 语义）
                 if db.query(models.Document).filter(
                         models.Document.file_hash == sha).first() is not None:
-                    skipped += 1  # sha256 去重跳过（已入库内容）
+                    skipped += 1
                 else:
                     title = _page_title(resp) or url
-                    doc = models.Document(
-                        title=title[:255],
-                        file_name=title[:255] or url,
-                        file_path="",                      # 爬虫无私有文件，正文存 content_text
-                        file_type="txt",
-                        file_size=len(text.encode("utf-8")),
-                        file_hash=sha,
-                        status=models.STATUS_PROCESSING,
-                        source=models.SOURCE_CRAWL,
-                        department_id=target_dept,         # 继承任务目标部门（空=公开，§2.5）
-                        uploaded_by=task.created_by,
-                    )
-                    db.add(doc)
-                    db.commit()
-                    db.refresh(doc)
-                    # 直接入库（爬虫为管理员授权行为，不走审批，spec §6.2）
-                    ingest_text(db, doc, text)
-                    if doc.status == models.STATUS_APPROVED:
-                        ingested += 1
+                    # 分支二：同 URL 的爬虫文档且内容变化 → 复用该 doc 走更新
+                    existing = db.query(models.Document).filter(
+                        models.Document.source_url == url,
+                        models.Document.source == models.SOURCE_CRAWL,
+                    ).order_by(models.Document.id.asc()).first()
+                    if existing is not None:
+                        # 更新：保留 id/department_id/uploaded_by，仅刷新内容相关字段
+                        existing.title = title[:255]
+                        existing.file_name = title[:255] or url
+                        existing.file_size = len(text.encode("utf-8"))
+                        existing.file_hash = sha
+                        existing.status = models.STATUS_PROCESSING
+                        existing.error_message = None
+                        # 复用入库管线：内置 delete_by_document + 删 ChunkParent + 重写
+                        # Chroma + fts.sync_document（先删后插），天然清理旧分块/向量/FTS
+                        ingest_text(db, existing, text)
+                        if existing.status == models.STATUS_APPROVED:
+                            updated += 1
+                        else:
+                            errors.append(f"{url}: 更新失败 {existing.error_message}")
                     else:
-                        errors.append(f"{url}: 入库失败 {doc.error_message}")
+                        # 分支三：URL 无记录 → 新增 Document（记录页面 URL 供增量识别）
+                        doc = models.Document(
+                            title=title[:255],
+                            file_name=title[:255] or url,
+                            file_path="",                      # 爬虫无私有文件，正文存 content_text
+                            file_type="txt",
+                            file_size=len(text.encode("utf-8")),
+                            file_hash=sha,
+                            source_url=url,
+                            status=models.STATUS_PROCESSING,
+                            source=models.SOURCE_CRAWL,
+                            department_id=target_dept,         # 继承任务目标部门（空=公开，§2.5）
+                            uploaded_by=task.created_by,
+                        )
+                        db.add(doc)
+                        db.commit()
+                        db.refresh(doc)
+                        # 直接入库（爬虫为管理员授权行为，不走审批，spec §6.2）
+                        ingest_text(db, doc, text)
+                        if doc.status == models.STATUS_APPROVED:
+                            ingested += 1
+                        else:
+                            errors.append(f"{url}: 入库失败 {doc.error_message}")
 
             # 深度内继续 BFS（无论本页是否入库/去重跳过，链接都需继续爬取）
             if depth < max_depth:
@@ -261,6 +287,7 @@ def _do_run(db, task, user):
     finally:
         run_log.fetched_count = fetched
         run_log.ingested_count = ingested
+        run_log.updated_count = updated
         run_log.skipped_count = skipped
         run_log.finished_at = datetime.utcnow()
         db.add(run_log)
@@ -273,7 +300,7 @@ def _do_run(db, task, user):
     # 任务执行结果写审计（spec F9：任务创建/启停/执行均审计）
     log_action(db, user, "crawl_run", "crawl_task", task.id, {
         "name": task.name,
-        "fetched": fetched, "ingested": ingested, "skipped": skipped,
+        "fetched": fetched, "ingested": ingested, "updated": updated, "skipped": skipped,
         "status": run_log.status, "error": run_log.error,
     })
     return run_log
