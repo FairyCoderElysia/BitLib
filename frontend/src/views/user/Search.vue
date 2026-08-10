@@ -3,21 +3,37 @@
     <!-- 检索区 -->
     <div class="search-area">
       <div class="search-bar">
-        <el-input
+        <el-autocomplete
           v-model="keyword"
           size="large"
+          class="search-autocomplete"
           placeholder="输入关键词搜索文档（支持标题 / 内容全文检索）"
           clearable
+          :fetch-suggestions="fetchSuggestions"
+          @select="onSelectCandidate"
           @keyup.enter="onSearch"
         >
           <template #prefix><el-icon><Search /></el-icon></template>
-        </el-input>
+        </el-autocomplete>
         <el-button type="primary" size="large" :loading="loading" @click="onSearch">
           搜索
         </el-button>
         <el-button size="large" plain :icon="Upload" @click="uploadVisible = true">
           上传文档
         </el-button>
+      </div>
+
+      <!-- 热门搜索（空态隐藏） -->
+      <div v-if="hotWords.length" class="hot-words">
+        <span class="hot-label">热门搜索</span>
+        <el-tag
+          v-for="w in hotWords"
+          :key="w"
+          class="hot-tag"
+          effect="plain"
+          size="small"
+          @click="onHotWordClick(w)"
+        >{{ w }}</el-tag>
       </div>
 
       <!-- 筛选栏 -->
@@ -146,6 +162,13 @@ const total = ref(0)
 const items = ref([])
 const loading = ref(false)
 
+// 热门搜索（F20）：空态/失败时隐藏，不打扰
+const hotWords = ref([])
+
+// 联想竞态防护：递增请求序号，仅采纳最后一次发起请求的响应
+let suggestSeq = 0
+let suggestTimer = null
+
 // 上传文档（走审批）
 const uploadVisible = ref(false)
 const selectedFile = ref(null)
@@ -210,8 +233,54 @@ function goDetail(id) {
   router.push(`/documents/${id}`)
 }
 
+// ---------------- 热门搜索 + 输入联想（F20） ----------------
+async function loadHotWords() {
+  try {
+    const res = await searchApi.hotWords()
+    hotWords.value = res.items || []
+  } catch (e) {
+    hotWords.value = [] // 加载失败静默隐藏，不打扰
+  }
+}
+
+function onHotWordClick(word) {
+  keyword.value = word
+  onSearch()
+}
+
+/** el-autocomplete 联想：300ms 防抖 + 递增序号竞态防护 */
+function fetchSuggestions(queryString, callback) {
+  const q = (queryString || '').trim()
+  clearTimeout(suggestTimer)
+  if (!q) {
+    suggestSeq++ // 使在途响应过期（Evaluator 发现：清空输入竞态）
+    callback([])
+    return
+  }
+  const seq = ++suggestSeq
+  suggestTimer = setTimeout(async () => {
+    try {
+      const res = await searchApi.suggest(q)
+      if (seq !== suggestSeq) return // 已发起新请求，丢弃过期响应
+      callback((res.items || []).map((it) => ({
+        id: it.id,
+        title: it.title,
+        value: it.title, // el-autocomplete 下拉展示字段
+      })))
+    } catch (e) {
+      if (seq === suggestSeq) callback([])
+    }
+  }, 300)
+}
+
+function onSelectCandidate(item) {
+  keyword.value = item.title
+  onSearch()
+}
+
 // URL 直接带 q 进入时自动检索
 onMounted(() => {
+  loadHotWords()
   if (keyword.value.trim()) fetchList()
 })
 
@@ -260,6 +329,27 @@ async function submitUpload() {
 .search-bar {
   display: flex;
   gap: 12px;
+}
+
+.search-autocomplete {
+  flex: 1;
+}
+
+.hot-words {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.hot-label {
+  font-size: 12px;
+  color: var(--ink-400);
+}
+
+.hot-tag {
+  cursor: pointer;
 }
 
 .filter-bar {

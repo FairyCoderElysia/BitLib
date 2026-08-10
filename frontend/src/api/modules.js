@@ -143,6 +143,14 @@ export const searchApi = {
   search(params) {
     return unwrap(http.get('/search', { params }))
   },
+  /** 热词榜 GET /search/hot-words → { items: string[] } */
+  hotWords() {
+    return unwrap(http.get('/search/hot-words'))
+  },
+  /** 输入联想 GET /search/suggest?q= → { items: [{id, title}] } */
+  suggest(q) {
+    return unwrap(http.get('/search/suggest', { params: { q } }))
+  },
 }
 
 // ---------------- AI 问答 ----------------
