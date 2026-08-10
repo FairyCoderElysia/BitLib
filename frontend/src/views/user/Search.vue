@@ -76,8 +76,14 @@
             </el-tag>
           </div>
 
-          <!-- 摘要（关键词高亮） -->
-          <p class="snippet" v-html="highlight(doc.snippet, keyword)" />
+          <!-- 摘要（F17，关键词高亮，2 行截断） -->
+          <el-text v-if="doc.summary" :line-clamp="2" tag="p" class="summary">
+            <span v-html="highlight(doc.summary, keyword)" />
+          </el-text>
+
+          <!-- 命中片段（关键词高亮）：与摘要文本相同时隐藏，避免重复 -->
+          <p v-if="doc.snippet && doc.snippet !== doc.summary"
+             class="snippet" v-html="highlight(doc.snippet, keyword)" />
 
           <div class="card-meta">
             <el-tag :type="FILE_TYPE_TAG[doc.file_type] || 'info'" size="small">
@@ -406,6 +412,19 @@ async function submitUpload() {
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* F17：摘要行（el-text 2 行截断），视觉与 snippet 一致 */
+.summary {
+  display: -webkit-box;
+  margin: 8px 0;
+  font-size: 13px;
+  color: var(--ink-600);
+  line-height: 1.6;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  word-break: break-word;
 }
 
 .card-meta {

@@ -17,6 +17,7 @@ from ..db import get_db
 from ..deps import get_current_user
 from ..errors import bad_request
 from ..search_service import hybrid_search
+from ..summary import get_display_summary
 from ..visibility import dept_visible
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,7 @@ def _document_snapshot(doc: models.Document) -> dict:
         "file_type": doc.file_type, "file_size": doc.file_size,
         "status": doc.status, "is_featured": doc.is_featured,
         "source": doc.source, "department_id": doc.department_id,
+        "summary": get_display_summary(doc),  # F17：文档摘要（有则用，否则截取）
         "created_at": doc.created_at.isoformat() if doc.created_at else None,
     }
 

@@ -14,8 +14,11 @@ from .config import settings
 logger = logging.getLogger(__name__)
 
 
-def chat(messages: list[dict], temperature: float = 0.3) -> str:
-    """messages: [{"role": "system"|"user"|"assistant", "content": str}]。返回回答文本。"""
+def chat(messages: list[dict], temperature: float = 0.3, timeout: float = 180) -> str:
+    """messages: [{"role": "system"|"user"|"assistant", "content": str}]。返回回答文本。
+
+    timeout：请求超时秒数（默认 180 保持向后兼容；摘要生成等短任务可传更小值）。
+    """
     url = settings.llm_base_url.rstrip("/") + "/chat/completions"
     headers = {}
     if settings.llm_api_key:
@@ -27,7 +30,7 @@ def chat(messages: list[dict], temperature: float = 0.3) -> str:
         "temperature": temperature,
     }
     try:
-        resp = httpx.post(url, headers=headers, json=payload, timeout=180)
+        resp = httpx.post(url, headers=headers, json=payload, timeout=timeout)
         resp.raise_for_status()
     except Exception as exc:
         logger.error("LLM 调用失败（mode=%s, url=%s）: %s", settings.llm_mode, url, exc)

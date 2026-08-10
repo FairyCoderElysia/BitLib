@@ -17,6 +17,7 @@ from .cleaning import MIN_TEXT_LEN, clean_text
 from .config import settings
 from .embeddings import embed
 from .parsers import parse_file
+from .summary import generate_summary
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,8 @@ def _run_pipeline(db: Session, doc: models.Document, raw: str) -> None:
 
     # 8. 更新文档 + FTS 同步
     doc.content_text = text
+    # 摘要生成（F17）：LLM 失败内部已降级截取，绝不抛错、不影响入库状态
+    doc.summary = generate_summary(db, doc)
     doc.status = models.STATUS_APPROVED
     doc.error_message = None
     doc.approved_at = doc.approved_at or datetime.utcnow()

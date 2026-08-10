@@ -5,6 +5,8 @@ from typing import Any, Generic, List, Optional, TypeVar
 
 from pydantic import BaseModel, Field
 
+from .summary import get_display_summary
+
 T = TypeVar("T")
 
 # ---------------- 请求体 ----------------
@@ -78,6 +80,7 @@ def document_to_dict(doc) -> dict:
         "department_name": doc.department.name if doc.department else None,
         "source": doc.source,
         "is_featured": doc.is_featured,
+        "summary": get_display_summary(doc),  # F17：摘要（pending/rejected 为截取/空）
         "reject_reason": doc.reject_reason,
         "error_message": doc.error_message,
         "created_at": doc.created_at,

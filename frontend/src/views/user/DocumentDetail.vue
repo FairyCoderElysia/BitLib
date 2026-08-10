@@ -87,6 +87,14 @@
           </el-descriptions-item>
         </el-descriptions>
 
+        <!-- 文档摘要（F17）：approved 且有摘要时展示（pending/rejected 不渲染） -->
+        <div v-if="detail.status === 'approved' && detail.summary" class="preview summary-block">
+          <div class="preview-title">
+            <el-icon><Document /></el-icon>&nbsp;文档摘要
+          </div>
+          <p class="summary-text">{{ detail.summary }}</p>
+        </div>
+
         <!-- 预览区 -->
         <div class="preview">
           <div class="preview-title">
@@ -116,7 +124,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Download, Star, StarFilled, View } from '@element-plus/icons-vue'
+import { Download, Document, Star, StarFilled, View } from '@element-plus/icons-vue'
 import { docApi, favApi } from '@/api/modules'
 import PreviewDocument from '@/components/PreviewDocument.vue'
 import { FILE_TYPE_LABEL, FILE_TYPE_TAG, SOURCE_LABEL, DOC_STATUS_LABEL, DOC_STATUS_TAG, formatSize, formatTime } from '@/utils/format'
@@ -275,6 +283,20 @@ onMounted(() => {
 
 .reject-reason {
   color: var(--danger);
+}
+
+/* F17：文档摘要区块（元信息下方、预览区上方） */
+.summary-block {
+  margin-top: 20px;
+}
+
+.summary-text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.8;
+  color: var(--ink-800);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .preview {
