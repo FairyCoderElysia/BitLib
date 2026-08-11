@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     embedding_api_model: str = ""
     reranker_model: str = "BAAI/bge-reranker-base"
     reranker_enabled: bool = True
+    rerank_threshold: float = 0.55        # 重排分数下限：低于视为不相关剔除（sigmoid 中性基准 0.5）
     search_threshold: float = 0.5          # 语义相似度阈值：低于则视为未找到（spec F3/F6）
 
 

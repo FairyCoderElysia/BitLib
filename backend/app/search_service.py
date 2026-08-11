@@ -123,9 +123,20 @@ def hybrid_search(db: Session, user: models.User, query: str,
             "is_featured": doc.is_featured,
             "doc": doc,
             "parent_id": parent_by_doc.get(doc.id, 0),
+            "kw_hit": doc.id in kw_ids,  # 关键词路命中（精准信号，强制保留）
         })
 
     ranked = rerank(query, candidates, limit=limit, scorer=scorer)
+
+    # 重排分数下限过滤（用户反馈：0.5 中性分噪音文档不应返回）
+    # 仅当实际使用 cross-encoder（reranker_enabled）时分数是 sigmoid 概率，可套阈值；
+    # RRF 模式（分数为秩融合值）不适用。
+    # 关键词路命中（kw_hit）为精准信号，无条件保留；仅纯语义召回的候选按阈值过滤
+    # （短查询如"机器"时相关文档分数可能整体偏低 ~0.53，绝对阈值会误伤）。
+    if settings.reranker_enabled:
+        ranked = [c for c in ranked
+                  if c.get("kw_hit") or c["score"] >= settings.rerank_threshold]
+        ranked = ranked[:limit]
 
     results = []
     for c in ranked:
