@@ -53,16 +53,6 @@
           <el-radio-button value="time">按时间</el-radio-button>
         </el-radio-group>
         <span v-if="total" class="total-text">共 {{ total }} 条结果</span>
-        <!-- 批量下载（F19）：选中集合跨页保留，≤50 由后端校验 -->
-        <el-button
-          type="primary"
-          plain
-          :disabled="!selectedIds.size"
-          :loading="downloading"
-          @click="handleBatchDownload"
-        >
-          批量下载（{{ selectedIds.size }}）
-        </el-button>
       </div>
     </div>
 
@@ -78,13 +68,6 @@
           @click="goDetail(doc.id)"
         >
           <div class="card-head">
-            <!-- 多选下载复选框（@click.stop 阻止触发卡片跳转） -->
-            <el-checkbox
-              class="select-check"
-              :model-value="selectedIds.has(doc.id)"
-              @click.stop
-              @change="(v) => onToggleSelect(doc.id, v)"
-            />
             <!-- 标题（关键词高亮） -->
             <span class="title" v-html="highlight(doc.title, keyword)" />
             <!-- 重点星标 -->
@@ -171,7 +154,6 @@ import { Upload, UploadFilled } from '@element-plus/icons-vue'
 import { searchApi, docApi } from '@/api/modules'
 import { FILE_TYPE_LABEL, FILE_TYPE_TAG, SOURCE_LABEL, formatSize, formatTime } from '@/utils/format'
 import { highlight } from '@/utils/highlight'
-import { saveBlob, timestampedZipName } from '@/utils/download'
 
 const route = useRoute()
 const router = useRouter()
@@ -185,10 +167,6 @@ const pageSize = ref(10)
 const total = ref(0)
 const items = ref([])
 const loading = ref(false)
-
-// 批量下载（F19）：选中集合跨页保留，翻页/切筛选不清空
-const selectedIds = ref(new Set())
-const downloading = ref(false)
 
 // 热门搜索（F20）：空态/失败时隐藏，不打扰
 const hotWords = ref([])
@@ -259,34 +237,6 @@ function onPageChange(p) {
 
 function goDetail(id) {
   router.push(`/documents/${id}`)
-}
-
-// ---------------- 批量下载（F19） ----------------
-function onToggleSelect(id, checked) {
-  const next = new Set(selectedIds.value)
-  if (checked) next.add(id)
-  else next.delete(id)
-  selectedIds.value = next
-}
-
-async function handleBatchDownload() {
-  if (!selectedIds.value.size) return
-  downloading.value = true
-  try {
-    const res = await docApi.batchDownload([...selectedIds.value])
-    saveBlob(res.data, timestampedZipName())
-    const skipped = Number(res.headers['x-skipped-count'] || 0)
-    if (skipped > 0) {
-      ElMessage.warning(`${skipped} 个文档不可下载，已自动剔除`)
-    } else {
-      ElMessage.success('批量下载已开始')
-    }
-    selectedIds.value = new Set() // 成功清空选中
-  } catch (e) {
-    /* 拦截器已提示（如超过 50 / 全部不可下载）；失败保留选中便于改选 */
-  } finally {
-    downloading.value = false
-  }
 }
 
 // ---------------- 热门搜索 + 输入联想（F20） ----------------
