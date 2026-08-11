@@ -94,6 +94,7 @@ def hybrid_search(db: Session, user: models.User, query: str,
     if not query.strip():
         return []
 
+    query_tokens = [t for t in jieba.cut_for_search(query) if t.strip() and len(t.strip()) > 1]
     kw_ids = keyword_recall(db, user, query, top_k)
     sem_hits = semantic_recall(db, user, query, top_k)
     sem_ids = [h["document_id"] for h in sem_hits]
@@ -126,7 +127,12 @@ def hybrid_search(db: Session, user: models.User, query: str,
             "is_featured": doc.is_featured,
             "doc": doc,
             "parent_id": parent_by_doc.get(doc.id, 0),
-            "kw_hit": doc.id in kw_ids,  # 关键词路命中（精准信号，强制保留）
+            # 查询词覆盖度：文档正文中出现的查询 token 数 / 查询 token 总数。
+            # 前缀通配会让泛词（如"企业"）命中大量弱相关文档，仅凭 FTS 命中
+            # 强制保留会混入噪音；覆盖 >=50% 查询词才算强关键词相关
+            # （单 token 查询天然 1.0，如"知识"→"知识库"）。
+            "kw_cov": (sum(1 for t in query_tokens if t in (doc.content_text or ""))
+                       / max(len(query_tokens), 1)),
         })
 
     ranked = rerank(query, candidates, limit=limit, scorer=scorer)
@@ -134,11 +140,12 @@ def hybrid_search(db: Session, user: models.User, query: str,
     # 重排分数下限过滤（用户反馈：0.5 中性分噪音文档不应返回）
     # 仅当实际使用 cross-encoder（reranker_enabled）时分数是 sigmoid 概率，可套阈值；
     # RRF 模式（分数为秩融合值）不适用。
-    # 关键词路命中（kw_hit）为精准信号，无条件保留；仅纯语义召回的候选按阈值过滤
-    # （短查询如"机器"时相关文档分数可能整体偏低 ~0.53，绝对阈值会误伤）。
+    # 关键词强相关（kw_cov >= 0.5，即覆盖半数以上查询词，如"知识"→"知识库"）无条件
+    # 保留——短查询时相关文档分数可能整体偏低（~0.53），绝对阈值会误伤；
+    # 仅覆盖少量泛词的弱命中（如多词查询只沾"企业"）仍按分数过滤。
     if settings.reranker_enabled:
         ranked = [c for c in ranked
-                  if c.get("kw_hit") or c["score"] >= settings.rerank_threshold]
+                  if c.get("kw_cov", 0.0) >= 0.5 or c["score"] >= settings.rerank_threshold]
         ranked = ranked[:limit]
 
     results = []
