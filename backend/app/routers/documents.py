@@ -8,10 +8,13 @@ import hashlib
 import logging
 import uuid
 from pathlib import Path
-from typing import Optional, Tuple
+from tempfile import SpooledTemporaryFile
+from typing import List, Optional, Tuple
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from .. import models, schemas, vector_store
@@ -29,6 +32,34 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 
 # 上传格式白名单（F2）
 ALLOWED_FILE_TYPES = {"txt", "docx", "pdf", "md"}
+
+# 单次批量下载上限（spec §3 F19 / §10.8）
+BATCH_DOWNLOAD_MAX = 50
+
+
+class BatchDownloadRequest(BaseModel):
+    """批量下载请求体：document_ids（空/超限由路由校验）。"""
+    document_ids: List[int] = Field(default_factory=list)
+
+
+def _unique_arcname(used: set, file_name: str) -> str:
+    """zip 内 arcname 唯一：重名追加 " (2)"、" (3)"…（"报告.pdf" → "报告 (2).pdf"）。
+
+    Evaluator eval-10：arcname 先做 basename 清洗防 zip slip（file_name 含 ../ 时截取末段）。
+    """
+    base = Path(file_name).name  # 防 zip slip：剥离任何路径成分
+    if base not in used:
+        used.add(base)
+        return base
+    stem = Path(base).stem
+    suffix = Path(base).suffix
+    i = 2
+    while True:
+        cand = f"{stem} ({i}){suffix}"
+        if cand not in used:
+            used.add(cand)
+            return cand
+        i += 1
 
 
 def file_ext(file_name: str) -> str:
@@ -133,6 +164,83 @@ def upload_document(
                {"file_name": doc.file_name, "file_size": doc.file_size,
                 "status": models.STATUS_PENDING}, client_ip(request))
     return schemas.ok(schemas.document_to_dict(doc))
+
+
+@router.post("/batch-download")
+def batch_download_documents(
+    request: Request,
+    body: BatchDownloadRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """批量下载（spec §3 F19）：多选文档打包 zip 流式返回。
+
+    - 校验：document_ids 空 → 400；原始长度 >50 → 400（先于去重，防重复填充绕过）。
+    - 剔除：非 approved / 部门不可见 / 物理文件丢失 → 计入 skipped（不审计）。
+    - 全部剔除 → 400（避免空 zip）；部分剔除 → 200 + 响应头 X-Skipped-Count。
+    - 每个实际打包的文档写 download 审计（detail.batch=True）。
+    - zip 写入 SpooledTemporaryFile（>8MB 自动落盘），StreamingResponse 分块（64KB）输出。
+    """
+    if not body.document_ids:
+        raise bad_request("document_ids 不能为空")
+    if len(body.document_ids) > BATCH_DOWNLOAD_MAX:
+        raise bad_request(f"单次最多下载 {BATCH_DOWNLOAD_MAX} 个文档")
+    ids = list(dict.fromkeys(body.document_ids))  # 去重保序（防御重复提交）
+
+    docs = db.query(models.Document).filter(models.Document.id.in_(ids)).all()
+    docs_by_id = {d.id: d for d in docs}
+
+    packable = []
+    skipped = 0
+    for doc_id in ids:
+        doc = docs_by_id.get(doc_id)
+        if doc is None:
+            skipped += 1
+            continue
+        if doc.status != models.STATUS_APPROVED or not dept_visible(current_user, doc):
+            skipped += 1
+            continue
+        if not (Path(settings.upload_dir) / doc.file_path).exists():
+            skipped += 1
+            continue
+        packable.append(doc)
+
+    if not packable:
+        raise bad_request("所选文档均不可下载或不存在")
+
+    # 审计：对每个实际打包的文档先写 download 记录（batch 标记），与单文件下载同口径
+    ip = client_ip(request)
+    for doc in packable:
+        log_action(db, current_user, "download", "document", doc.id,
+                   {"file_name": doc.file_name, "batch": True}, ip)
+
+    # zip 打包：SpooledTemporaryFile 超 8MB 自动落盘，避免全量进内存
+    spool = SpooledTemporaryFile(max_size=8 * 1024 * 1024)
+    used_names = set()
+    with ZipFile(spool, "w", ZIP_DEFLATED) as zf:
+        for doc in packable:
+            target = Path(settings.upload_dir) / doc.file_path
+            zf.write(str(target), arcname=_unique_arcname(used_names, doc.file_name))
+    spool.seek(0)
+
+    def iter_spool():
+        try:
+            while True:
+                chunk = spool.read(64 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            spool.close()
+
+    return StreamingResponse(
+        iter_spool(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": 'attachment; filename="documents-batch.zip"',
+            "X-Skipped-Count": str(skipped),
+        },
+    )
 
 
 @router.get("/mine")

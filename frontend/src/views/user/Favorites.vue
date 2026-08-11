@@ -50,11 +50,32 @@
 
       <!-- 右：文档列表 -->
       <div class="doc-panel" v-loading="loading">
-        <h3 class="panel-title">{{ currentFolderTitle }}</h3>
+        <div class="doc-panel-head">
+          <h3 class="panel-title">{{ currentFolderTitle }}</h3>
+          <!-- 批量下载（F19）：跨收藏夹保留选中，仅统计可下载项 -->
+          <el-button
+            type="primary"
+            plain
+            size="small"
+            :disabled="!selectedIds.size"
+            :loading="downloading"
+            @click="handleBatchDownload"
+          >
+            批量下载（{{ selectedIds.size }}）
+          </el-button>
+        </div>
 
         <el-empty v-if="!loading && !filtered.length" description="暂无收藏文档" />
 
         <div v-for="item in filtered" :key="item.id" class="fav-card">
+          <!-- 多选下载复选框（失效条目禁用且不可勾选；@click.stop 阻止触发卡片跳转） -->
+          <el-checkbox
+            class="select-check"
+            :model-value="selectedIds.has(item.document_id ?? item.document?.id)"
+            :disabled="!item.is_valid"
+            @click.stop
+            @change="(v) => onToggleSelect(item, v)"
+          />
           <div v-if="!item.is_valid" class="fav-card-main fav-card-invalid">
             <div class="fav-card-title">
               文档已失效（已被下架或删除）
@@ -94,8 +115,9 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, MoreFilled } from '@element-plus/icons-vue'
-import { favApi } from '@/api/modules'
+import { favApi, docApi } from '@/api/modules'
 import { FILE_TYPE_LABEL, FILE_TYPE_TAG, formatSize, formatTime } from '@/utils/format'
+import { saveBlob, timestampedZipName } from '@/utils/download'
 
 const router = useRouter()
 
@@ -104,6 +126,10 @@ const favorites = ref([])
 const activeFolder = ref(null) // null = 全部收藏
 const newFolderName = ref('')
 const loading = ref(false)
+
+// 批量下载（F19）：选中集合跨收藏夹保留
+const selectedIds = ref(new Set())
+const downloading = ref(false)
 
 const currentFolderTitle = computed(() => {
   if (activeFolder.value === null) return '全部收藏'
@@ -201,6 +227,36 @@ function goDetail(id) {
   router.push(`/documents/${id}`)
 }
 
+// ---------------- 批量下载（F19） ----------------
+function onToggleSelect(item, checked) {
+  const docId = item.document_id ?? item.document?.id
+  if (!item.is_valid || docId == null) return
+  const next = new Set(selectedIds.value)
+  if (checked) next.add(docId)
+  else next.delete(docId)
+  selectedIds.value = next
+}
+
+async function handleBatchDownload() {
+  if (!selectedIds.value.size) return
+  downloading.value = true
+  try {
+    const res = await docApi.batchDownload([...selectedIds.value])
+    saveBlob(res.data, timestampedZipName())
+    const skipped = Number(res.headers['x-skipped-count'] || 0)
+    if (skipped > 0) {
+      ElMessage.warning(`${skipped} 个文档不可下载，已自动剔除`)
+    } else {
+      ElMessage.success('批量下载已开始')
+    }
+    selectedIds.value = new Set() // 成功清空选中
+  } catch (e) {
+    /* 拦截器已提示；失败保留选中便于改选 */
+  } finally {
+    downloading.value = false
+  }
+}
+
 onMounted(fetchData)
 </script>
 
@@ -275,6 +331,22 @@ onMounted(fetchData)
   padding: 16px 20px;
   min-height: 400px;
   box-shadow: var(--shadow-sm);
+}
+
+.doc-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.doc-panel-head .panel-title {
+  margin: 0;
+}
+
+.select-check {
+  flex-shrink: 0;
 }
 
 .fav-card {

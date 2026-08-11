@@ -47,6 +47,10 @@ export const docApi = {
   download(id) {
     return http.get(`/documents/${id}/download`, { responseType: 'blob' })
   },
+  /** 批量下载：返回 axios response（data 为 zip blob，headers 含 x-skipped-count） */
+  batchDownload(ids) {
+    return http.post('/documents/batch-download', { document_ids: ids }, { responseType: 'blob' })
+  },
   /** 原文在线预览：返回 axios response（data 为 ArrayBuffer） */
   preview(id) {
     return http.get(`/documents/${id}/preview`, { responseType: 'arraybuffer' })

@@ -60,6 +60,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Skipped-Count"],  # 批量下载剔除计数（生产跨域可读）
 )
 
 # 路由注册：统一前缀 /api（spec §10.1）
