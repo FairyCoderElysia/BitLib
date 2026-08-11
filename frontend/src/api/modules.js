@@ -35,6 +35,10 @@ export const docApi = {
   detail(id) {
     return unwrap(http.get(`/documents/${id}`))
   },
+  /** 相似文档推荐（F18）：top_k ≤ 5，distance 升序 */
+  related(id) {
+    return unwrap(http.get(`/documents/${id}/related`))
+  },
   /** 撤回（仅本人 pending） */
   withdraw(id) {
     return unwrap(http.delete(`/documents/${id}`))

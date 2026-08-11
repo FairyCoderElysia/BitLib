@@ -115,27 +115,51 @@
           <!-- 非 approved / 无预览权限 -->
           <el-empty v-else-if="detail.status !== 'approved'" description="文档当前不可预览（仅已通过审批的文档可预览）" />
         </div>
+
+        <!-- 相关推荐（F18）：approved 请求中显示 loading；有推荐时展示，点击跳转目标详情 -->
+        <div v-if="related.length || relatedLoading" class="preview related-block" v-loading="relatedLoading">
+          <div class="preview-title">
+            <el-icon><Connection /></el-icon>&nbsp;相关推荐
+          </div>
+          <div class="related-list">
+            <div v-for="item in related" :key="item.id" class="related-card" @click="goDoc(item.id)">
+              <div class="related-line">
+                <span class="related-title">{{ item.title }}</span>
+                <el-tag :type="FILE_TYPE_TAG[item.file_type] || 'info'" size="small">
+                  {{ FILE_TYPE_LABEL[item.file_type] || item.file_type }}
+                </el-tag>
+              </div>
+              <p class="related-summary">{{ item.summary }}</p>
+            </div>
+          </div>
+        </div>
       </template>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { useRoute } from 'vue-router'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Download, Document, Star, StarFilled, View } from '@element-plus/icons-vue'
+import { Connection, Download, Document, Star, StarFilled, View } from '@element-plus/icons-vue'
 import { docApi, favApi } from '@/api/modules'
 import PreviewDocument from '@/components/PreviewDocument.vue'
 import { FILE_TYPE_LABEL, FILE_TYPE_TAG, SOURCE_LABEL, DOC_STATUS_LABEL, DOC_STATUS_TAG, formatSize, formatTime } from '@/utils/format'
 
 const route = useRoute()
-const documentId = Number(route.params.id)
+const router = useRouter()
+const documentId = ref(Number(route.params.id))
+let detailSeq = 0  // 请求序号：防快速连点推荐卡片时旧响应覆盖新详情（Evaluator eval-9 发现）
 
 const detail = ref(null)
 const loading = ref(false)
 const downloading = ref(false)
 const favLoading = ref(false)
+
+// F18：相关推荐（仅 approved 请求，失败静默保持空）
+const related = ref([])
+const relatedLoading = ref(false)
 
 // 收藏相关
 const folders = ref([])
@@ -155,14 +179,38 @@ const canPreviewText = computed(
 )
 
 async function fetchDetail() {
+  const seq = ++detailSeq
   loading.value = true
   try {
-    detail.value = await docApi.detail(documentId)
+    const d = await docApi.detail(documentId.value)
+    if (seq !== detailSeq) return // 过期响应丢弃（快速切换文档时）
+    detail.value = d
+    fetchRelated()
   } catch (e) {
     /* 拦截器已提示 */
   } finally {
-    loading.value = false
+    if (seq === detailSeq) loading.value = false
   }
+}
+
+/** 相关推荐：仅 approved 请求；失败静默，不影响详情区 */
+async function fetchRelated() {
+  related.value = []
+  if (detail.value?.status !== 'approved') return
+  relatedLoading.value = true
+  try {
+    const items = await docApi.related(documentId.value)
+    related.value = Array.isArray(items) ? items : []
+  } catch (e) {
+    /* 拦截器已提示 */
+  } finally {
+    relatedLoading.value = false
+  }
+}
+
+/** 点击推荐卡片 → 跳转目标文档详情（watch 路由触发重载） */
+function goDoc(id) {
+  router.push({ name: 'document-detail', params: { id } })
 }
 
 /** 加载收藏夹与当前文档是否已收藏 */
@@ -173,7 +221,7 @@ async function fetchFavState() {
       favApi.listFavorites(),
     ])
     folders.value = folderRes.items || []
-    const hit = (favRes.items || []).find((f) => f.document.id === documentId)
+    const hit = (favRes.items || []).find((f) => f.document.id === documentId.value)
     favoriteId.value = hit ? hit.id : null
   } catch (e) {
     /* 忽略 */
@@ -184,12 +232,12 @@ async function fetchFavState() {
 async function handleDownload() {
   downloading.value = true
   try {
-    const res = await docApi.download(documentId)
+    const res = await docApi.download(documentId.value)
     const blob = res.data
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = detail.value?.file_name || `document-${documentId}`
+    a.download = detail.value?.file_name || `document-${documentId.value}`
     document.body.appendChild(a)
     a.click()
     a.remove()
@@ -213,7 +261,7 @@ async function handleFavorite() {
       folderId = created.id
       folders.value.push(created)
     }
-    const res = await favApi.addFavorite({ document_id: documentId, folder_id: folderId })
+    const res = await favApi.addFavorite({ document_id: documentId.value, folder_id: folderId })
     favoriteId.value = res.id
     favVisible.value = false
     favFolderId.value = null
@@ -234,7 +282,7 @@ async function handleRemoveFavorite() {
     return // 用户取消
   }
   try {
-    await favApi.removeFavorite(documentId)
+    await favApi.removeFavorite(documentId.value)
     favoriteId.value = null
     ElMessage.success('已取消收藏')
   } catch (e) {
@@ -243,6 +291,13 @@ async function handleRemoveFavorite() {
 }
 
 onMounted(() => {
+  fetchDetail()
+  fetchFavState()
+})
+
+// F18 必要前置：详情页内跳转（如点击相关推荐）时路由参数变化，需重载详情/收藏/推荐
+watch(() => route.params.id, (nid) => {
+  documentId.value = Number(nid)
   fetchDetail()
   fetchFavState()
 })
@@ -327,6 +382,53 @@ onMounted(() => {
   word-break: break-word;
   max-height: 70vh;
   overflow: auto;
+}
+
+/* F18：相关推荐区块（预览区之后；复用 .preview 卡片，无渐变/动画） */
+.related-block {
+  margin-top: 20px;
+}
+
+.related-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.related-card {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+  background: var(--card);
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.related-card:hover {
+  border-color: var(--brand-border);
+  background: var(--brand-weak);
+}
+
+.related-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.related-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink-900);
+}
+
+.related-summary {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--ink-600);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .fav-actions {

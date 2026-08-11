@@ -14,12 +14,13 @@ from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from .. import models, schemas
+from .. import models, schemas, vector_store
 from ..audit import client_ip, log_action
 from ..config import settings
 from ..db import get_db
 from ..deps import get_current_user
 from ..errors import bad_request, conflict, not_found, forbidden
+from ..summary import get_display_summary
 from ..visibility import can_access, can_preview, dept_visible
 
 logger = logging.getLogger(__name__)
@@ -184,6 +185,52 @@ def document_detail(document_id: int,
     if doc.status == models.STATUS_APPROVED:
         data["content_text"] = doc.content_text
     return schemas.ok(data)
+
+
+@router.get("/{document_id}/related")
+def related_documents(document_id: int,
+                      db: Session = Depends(get_db),
+                      current_user: models.User = Depends(get_current_user)):
+    """相似文档推荐（spec §3 F18）：文档级向量最近邻 + 双层权限过滤。
+
+    - 权限口径与详情一致：不可访问 → 404（不泄露存在性）。
+    - 仅 approved 有推荐；无 child 向量 / 非 approved → 空数组。
+    - 召回阶段复用 vector_store.query()（status=approved + 公开/本部门），
+      DB 阶段再以 approved + dept_visible 兜底（防脏数据，口径同 F3）。
+    - distance 为 cosine 距离（越小越相似），供前端排序/调试。
+    """
+    doc = db.get(models.Document, document_id)
+    if doc is None or not can_access(current_user, doc):
+        raise not_found("文档不存在或无权访问")
+    if doc.status != models.STATUS_APPROVED:
+        return schemas.ok([])
+    vec = vector_store.get_document_vector(document_id)
+    if vec is None:
+        return schemas.ok([])
+    cands = vector_store.query_similar_documents(
+        vec, exclude_document_id=document_id, top_k=5,
+        user_department_id=current_user.department_id,
+        is_admin=current_user.role == models.ROLE_ADMIN)
+    ids = [c["document_id"] for c in cands]
+    docs = {}
+    if ids:
+        docs = {d.id: d for d in db.query(models.Document).filter(
+            models.Document.id.in_(ids)).all()}
+    items = []
+    for c in cands:
+        d = docs.get(c["document_id"])
+        if d is None or d.status != models.STATUS_APPROVED or not dept_visible(current_user, d):
+            continue
+        items.append({
+            "id": d.id,
+            "title": d.title,
+            "file_type": d.file_type,
+            "summary": get_display_summary(d),
+            "source": d.source,
+            "department_name": d.department.name if d.department else None,
+            "distance": c["distance"],
+        })
+    return schemas.ok(items)
 
 
 @router.get("/{document_id}/preview")

@@ -9,6 +9,7 @@
 - 维度切换（embedding_dim）时需全量重建：删除集合后重新入库
 """
 import logging
+import math
 
 from .config import settings
 
@@ -97,3 +98,46 @@ def count_by_document(document_id: int) -> int:
         return len(res["ids"])
     except Exception:
         return 0
+
+
+def get_document_vector(document_id: int) -> list[float] | None:
+    """文档级向量（spec F18）：该文档全部 child embedding 逐维平均 + L2 归一化。
+
+    无 child（未入库/非 approved）返回 None。文档多时全量拉取开销见
+    contract-9 §6（本 sprint 不加缓存，保持最简单）。
+    """
+    col = _get_collection()
+    res = col.get(where={"document_id": document_id}, include=["embeddings"])
+    vecs = res.get("embeddings")
+    if vecs is None or len(vecs) == 0:  # numpy 数组不能用 `or` 判真（ambiguous）
+        return None
+    n = len(vecs)
+    avg = [sum(float(v[i]) for v in vecs) / n for i in range(len(vecs[0]))]
+    norm = math.sqrt(sum(x * x for x in avg)) or 1.0
+    return [x / norm for x in avg]
+
+
+def query_similar_documents(document_vector: list[float], exclude_document_id: int,
+                            top_k: int = 5, user_department_id: int | None = None,
+                            is_admin: bool = False) -> list[dict]:
+    """按可见性过滤的文档级相似查询（spec F18）。
+
+    1) 用现有 query()（已按 status=approved + 公开/本部门过滤）多取候选：
+       n_results = max(top_k * 4, 20)（去重后保证足量，超库内数量时 Chroma 自动截断）；
+    2) 按 document_id 去重，每文档取最小 distance（该文档与目标最近的 child 距离），
+       排除 exclude_document_id（自身）；
+    3) 升序取 top_k。返回 [{document_id, distance}]。
+    排除自身在应用层做（Chroma where 组合 $ne 与现有 $and 复杂且易错）。
+    """
+    hits = query(document_vector, max(top_k * 4, 20),
+                 user_department_id=user_department_id, is_admin=is_admin)
+    best: dict[int, float] = {}
+    for h in hits:
+        did = h["document_id"]
+        if did == exclude_document_id:
+            continue
+        dist = h["distance"]
+        if did not in best or dist < best[did]:
+            best[did] = dist
+    ordered = sorted(best, key=lambda k: best[k])[:top_k]
+    return [{"document_id": did, "distance": best[did]} for did in ordered]
