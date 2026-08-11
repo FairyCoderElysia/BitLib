@@ -31,7 +31,10 @@ def keyword_recall(db: Session, user: models.User, query: str, top_k: int = RECA
     tokens = [t for t in jieba.cut_for_search(query) if t.strip() and len(t.strip()) > 1]
     if not tokens:
         return []
-    match = " OR ".join(tokens)
+    # FTS5 前缀通配：jieba 常把复合词作整体 token（如"知识库"），用户搜子词（"知识"）
+    # 时精确匹配会漏。每个 token 加 `*` 前缀（"知识*" 命中"知识库"），
+    # 由 RRF + 重排负责排序与过滤（用户反馈：搜"知识"无结果）。
+    match = " OR ".join(f"{t}*" for t in tokens)
     # 部门过滤：admin 跳过（历史 bug：admin department_id 为 None 时被限成仅公开文档）
     if user.role == models.ROLE_ADMIN:
         dept_clause = ""
