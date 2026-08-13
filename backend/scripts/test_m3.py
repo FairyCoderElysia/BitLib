@@ -67,6 +67,7 @@ def _make_pdf(path: Path, text: str):
 
 def main():
     shutil.rmtree(TEST_ROOT, ignore_errors=True)
+    TEST_ROOT.mkdir(parents=True, exist_ok=True)
     passed: list = []
 
     def check(name):

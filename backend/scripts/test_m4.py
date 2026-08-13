@@ -52,6 +52,7 @@ def H(token):
 
 def main():
     shutil.rmtree(TEST_ROOT, ignore_errors=True)
+    TEST_ROOT.mkdir(parents=True, exist_ok=True)
     passed: list = []
 
     def check(name):

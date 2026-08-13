@@ -31,9 +31,60 @@ async def lifespan(app: FastAPI):
     from .scheduler import shutdown_scheduler, start_scheduler
     start_scheduler()
     _prewarm()  # 后台预热 embedding 模型，避免首请求加载竞态（历史 500 根因）
+    _ensure_vector_health()  # 后台检测 Chroma HNSW 可加载，损坏时自动重建（自愈）
     logger.info("%s 已启动", settings.app_name)
     yield
     shutdown_scheduler()
+
+
+def _ensure_vector_health() -> None:
+    """后台线程：验证 Chroma 向量索引可查询；HNSW 跨进程加载失败（Windows 上
+    chromadb 持久化脆弱，重启后偶发 "Error loading hnsw index"）时自动重建。
+
+    重建在服务进程内执行（reset 集合 → 全部 approved 文档重新入库 → 预热查询），
+    完成后检索自动恢复；重建期间检索可能短暂 500（自愈窗口）。
+    """
+
+    def _check():
+        try:
+            import time
+            time.sleep(3)  # 等服务完全就绪
+            from . import vector_store
+            vector_store.query([0.0] * settings.embedding_dim, 1,
+                               user_department_id=None, is_admin=True)
+            logger.info("Chroma 向量索引健康，无需重建")
+            return
+        except Exception as exc:
+            logger.warning("Chroma HNSW 加载失败，自动重建向量索引: %s", exc)
+        try:
+            from .db import SessionLocal
+            from . import models
+            from .ingest import ingest_document, ingest_text
+            from . import vector_store
+            vector_store.reset_collection()
+            db = SessionLocal()
+            try:
+                docs = db.query(models.Document).filter(
+                    models.Document.status == models.STATUS_APPROVED).all()
+                ok = 0
+                for doc in docs:
+                    if doc.file_path:
+                        ingest_document(db, doc)
+                    else:
+                        ingest_text(db, doc, doc.content_text or "")
+                    db.refresh(doc)
+                    if doc.status == models.STATUS_APPROVED:
+                        ok += 1
+                vector_store.query([0.0] * settings.embedding_dim, 1,
+                                   user_department_id=None, is_admin=True)
+                logger.info("向量索引自动重建完成：%s 个文档", ok)
+            finally:
+                db.close()
+        except Exception as exc:
+            logger.exception("向量索引自动重建失败: %s", exc)
+
+    import threading
+    threading.Thread(target=_check, daemon=True).start()
 
 
 def _prewarm() -> None:

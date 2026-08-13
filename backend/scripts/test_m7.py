@@ -4,7 +4,7 @@
 覆盖验收项（对应 contract-7.md §4）：
   1. 数据准备：admin 直入库文档（LLM 未配置 → 走降级截取）
   2. 降级摘要：直入库后 status == approved、error_message is None、
-     Document.summary 非空、长度 ≤ 120、等于 content_text 前 120 字符
+     Document.summary 非空、长度 ≤ 120、等于 content_text 断句前缀（S11 口径）
   3. 不阻塞入库：LLM 失败下整个入库管线成功（approved），无 failed
   4. 检索接口带摘要：GET /api/search 返回 items[].summary 非空
   5. 详情接口带摘要：GET /api/documents/{id} 返回 summary 非空
@@ -43,6 +43,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app import models  # noqa: E402
 from app.main import app  # noqa: E402
+from app.summary import _fallback_cut  # noqa: E402  (S11 断句口径，供降级断言复用)
 
 ADMIN_PASSWORD = "Admin@123456"
 
@@ -53,6 +54,7 @@ def H(token):
 
 def main():
     shutil.rmtree(TEST_ROOT, ignore_errors=True)
+    TEST_ROOT.mkdir(parents=True, exist_ok=True)
     passed: list = []
 
     def check(name):
@@ -102,9 +104,10 @@ def main():
             summary = detail["summary"]
             assert summary, f"summary 应为非空（降级截取）: {detail}"
             assert len(summary) <= 120, f"降级摘要应 ≤120 字符: {len(summary)}"
-            assert summary == (detail["content_text"] or "")[:120], \
-                f"降级摘要应等于 content_text 前缀: {summary!r}"
-            check("2. LLM 未配置时降级摘要 = content_text 前 120 字符")
+            # S11 优化 6：降级摘要按句断句（_fallback_cut），不再硬切前 120 字符
+            assert summary == _fallback_cut(detail["content_text"] or ""), \
+                f"降级摘要应等于 content_text 断句前缀: {summary!r}"
+            check("2. LLM 未配置时降级摘要 = content_text 断句前缀（≤120）")
 
             # ---------- 3. 入库未因 LLM 失败而 failed ----------
             r = c.get("/api/admin/documents", params={"status": "failed"},
@@ -138,21 +141,21 @@ def main():
 
         # 6a. LLM 成功：返回清理后的 LLM 文本（≤200，压缩空白）
         with mock.patch("app.llm.chat", return_value="  核心内容：\n\n安全制度要点与应急流程。  "):
-            out = generate_summary(None, FakeDoc(text))
+            out = generate_summary(FakeDoc(text))
         assert out == "核心内容： 安全制度要点与应急流程。", f"LLM 文本应清理空白: {out!r}"
         assert len(out) <= 200, f"LLM 摘要应 ≤200 字符: {len(out)}"
         check("6a. LLM 成功时返回清理后摘要（≤200 字符）")
 
         # 6b. LLM 抛异常：回退截取，绝不抛错
         with mock.patch("app.llm.chat", side_effect=RuntimeError("AI 服务不可用")):
-            out = generate_summary(None, FakeDoc(text))
-        assert out == text[:120], f"LLM 异常应回退截取: {out!r}"
-        check("6b. LLM 抛异常时回退 content_text 前缀截取")
+            out = generate_summary(FakeDoc(text))
+        assert out == _fallback_cut(text), f"LLM 异常应回退断句截取: {out!r}"
+        check("6b. LLM 抛异常时回退 content_text 断句截取")
 
-        # 6c. get_display_summary：有 summary 用 summary，否则截取
+        # 6c. get_display_summary：有 summary 用 summary，否则截取（断句口径）
         assert get_display_summary(FakeDoc(text, summary="已生成摘要")) == "已生成摘要"
-        assert get_display_summary(FakeDoc(text)) == text[:120]
-        check("6c. get_display_summary 优先 summary，否则截取")
+        assert get_display_summary(FakeDoc(text)) == _fallback_cut(text)
+        check("6c. get_display_summary 优先 summary，否则断句截取")
 
         print(f"\n=== ALL {len(passed)} M7 TESTS PASSED ===")
     finally:

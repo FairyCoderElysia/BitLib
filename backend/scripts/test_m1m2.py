@@ -22,6 +22,7 @@ TEST_DB = (TEST_ROOT / "app.db").as_posix()
 os.environ["ADMIN_INITIAL_PASSWORD"] = "Admin@123456"
 os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DB}"
 os.environ["UPLOAD_DIR"] = str(TEST_ROOT / "uploads")
+os.environ["CHROMA_DIR"] = str(TEST_ROOT / "chroma")  # 隔离向量库，防止污染正式库/并发竞态
 os.environ["MAX_UPLOAD_MB"] = "2"  # 便于验证大小上限
 os.environ.setdefault("SECRET_KEY", "test-secret-key")
 
@@ -39,6 +40,7 @@ def H(token):
 
 def main():
     shutil.rmtree(TEST_ROOT, ignore_errors=True)
+    TEST_ROOT.mkdir(parents=True, exist_ok=True)
     passed: list = []
 
     def check(name):

@@ -47,6 +47,12 @@ def _mark_failed(db: Session, doc: models.Document, exc: Exception) -> None:
     doc.status = models.STATUS_FAILED
     doc.error_message = str(exc)[:500]
     db.add(doc)
+    # FTS 冗余列同步（S11 优化 1）：failed 态也刷新 document_fts 行，避免与主表
+    # status/内容不一致；同步失败仅告警，绝不阻断 failed 状态写入
+    try:
+        fts.sync_document(db, doc)
+    except Exception:
+        logger.exception("FTS 失败态同步失败（doc=%s），主表状态不受影响", doc.id)
     db.commit()
     logger.error("文档 %s 入库失败: %s", doc.id, exc)
 
@@ -61,9 +67,18 @@ def _run_pipeline(db: Session, doc: models.Document, raw: str) -> None:
     # 3. 父子分片
     chunks = chunk_document(text)
 
-    # 4. 清理旧分块（重新入库场景）
-    vector_store.delete_by_document(doc.id)
-    db.query(models.ChunkParent).filter(models.ChunkParent.document_id == doc.id).delete()
+    # 4. 清理旧分块（仅重新入库场景需要）
+    #    首次入库集合中无该文档，跳过 Chroma delete——空集合上 delete(where=...)
+    #    会触发 Chroma compactor 异步竞态，偶发 "Error loading hnsw index" 致入库失败
+    #    （实测 M1M2 回归偶现）。以 SQLite 侧 ChunkParent 是否存在判断是否重入库。
+    if db.query(models.ChunkParent).filter(
+            models.ChunkParent.document_id == doc.id).first() is not None:
+        vector_store.delete_by_document(doc.id)
+        db.query(models.ChunkParent).filter(
+            models.ChunkParent.document_id == doc.id).delete()
+    else:
+        db.query(models.ChunkParent).filter(
+            models.ChunkParent.document_id == doc.id).delete()  # 兜底清 SQLite 侧
 
     # 5. 全部 child 向量化
     child_texts = [c["text"] for p in chunks for c in p["children"]]
@@ -102,7 +117,7 @@ def _run_pipeline(db: Session, doc: models.Document, raw: str) -> None:
     # 8. 更新文档 + FTS 同步
     doc.content_text = text
     # 摘要生成（F17）：LLM 失败内部已降级截取，绝不抛错、不影响入库状态
-    doc.summary = generate_summary(db, doc)
+    doc.summary = generate_summary(doc)
     doc.status = models.STATUS_APPROVED
     doc.error_message = None
     doc.approved_at = doc.approved_at or datetime.utcnow()

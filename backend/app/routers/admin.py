@@ -192,13 +192,51 @@ def regenerate_summary(document_id: int,
     if doc.status != models.STATUS_APPROVED or not doc.content_text:
         raise bad_request("仅已入库（approved）且有正文的文档可重新生成摘要")
     from ..summary import generate_summary
-    doc.summary = generate_summary(db, doc)
+    doc.summary = generate_summary(doc)
     db.add(doc)
     db.commit()
     log_action(db, current_user, "regenerate_summary", "document", doc.id,
                {"file_name": doc.file_name, "summary_len": len(doc.summary or "")},
                client_ip(request))
     return schemas.ok({"id": doc.id, "summary": doc.summary})
+
+
+@router.post("/rebuild-index")
+def rebuild_vector_index(request: Request,
+                         db: Session = Depends(get_db),
+                         current_user: models.User = Depends(require_admin)):
+    """重建向量索引（运维）：服务进程内删除并重建 Chroma 集合，对全部 approved
+    文档重新入库（上传文档读文件、爬虫文档用 content_text）。
+
+    背景：Windows 上跨进程写入的 Chroma HNSW 状态不可靠（"Error loading hnsw
+    index"），故重建必须在服务进程内执行（本接口），完成后服务继续运行即可
+    正常检索；请勿重建后立即强杀服务（会中断 flush）。
+    """
+    from .. import vector_store
+    from ..ingest import ingest_document, ingest_text
+    vector_store.reset_collection()
+    docs = db.query(models.Document).filter(
+        models.Document.status == models.STATUS_APPROVED).all()
+    ok = fail = 0
+    for doc in docs:
+        if doc.file_path:
+            ingest_document(db, doc)
+        else:
+            ingest_text(db, doc, doc.content_text or "")
+        db.refresh(doc)
+        if doc.status == models.STATUS_APPROVED:
+            ok += 1
+        else:
+            fail += 1
+    # 触发 compactor 构建 HNSW 索引（同进程查询预热）
+    try:
+        vector_store.query([0.0] * settings.embedding_dim, 1,
+                           user_department_id=None, is_admin=True)
+    except Exception:
+        pass
+    log_action(db, current_user, "rebuild_index", "system", None,
+               {"rebuilt": ok, "failed": fail}, client_ip(request))
+    return schemas.ok({"rebuilt": ok, "failed": fail})
 
 
 class DocumentPatch(BaseModel):

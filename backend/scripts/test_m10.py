@@ -3,14 +3,15 @@
 
 覆盖（对应 contract-10 §4 验收）：
   1. 正常批量：D1/D2/D3（approved 可见）→ 200、application/zip、X-Skipped-Count=0，
-     zip 恰 3 个条目且 arcname 与 file_name 一致、内容非空
-  2. 混入不可见：加市场部 D4 → 200 + X-Skipped-Count=1，zip 恰 3 个（不含 D4）
-  3. 混入文件丢失：D1 + D5（物理文件缺失）→ 200 + X-Skipped-Count=1，zip 1 个
+     zip 恰 3 文档 + manifest.txt（共 4 条目）且 arcname 与 file_name 一致、内容非空
+  2. 混入不可见：加市场部 D4 → 200 + X-Skipped-Count=1，zip 3 文档 + manifest（不含 D4）
+  3. 混入文件丢失：D1 + D5（物理文件缺失）→ 200 + X-Skipped-Count=1，zip 1 文档 + manifest
   4. 超过 50（重复填充）→ 400；空列表 → 400；全不可见 [D4] → 400
   5. 审计：D1-D3 有 download(batch=true)；被剔除 D4 无下载审计
   6. 重名：D6/D7 file_name 相同 → zip 内 arcname 不重复（含 " (2)" 后缀）
   7. admin 兜底：admin 批量 [D1, D4] → 200 + X-Skipped-Count=0（全量可见）
   8. 回归：单文件下载 GET /documents/{id}/download 仍 200
+  9. S11 联动：zip 含 manifest.txt 清单（表头 + 每文档一行），条目数 = 文档数 + 1
 
 运行：cd backend && python scripts/test_m10.py
 """
@@ -132,19 +133,25 @@ def main():
             assert "application/zip" in r.headers.get("content-type", ""), r.headers
             assert r.headers.get("x-skipped-count") == "0", r.headers
             names = read_zip_names(r)
-            assert len(names) == 3, f"zip 应恰 3 个条目: {names}"
-            assert set(names) == {"文档A.txt", "文档B.txt", "文档C.txt"}, names
+            assert len(names) == 4, f"zip 应 3 文档 + manifest.txt: {names}"
+            assert set(names) == {"文档A.txt", "文档B.txt", "文档C.txt", "manifest.txt"}, names
             with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
                 for n in zf.namelist():
                     assert zf.read(n), f"条目 {n} 内容不应为空"
-            check("1. 正常批量：3 个可见文档 → 200 / zip 3 条目 / X-Skipped-Count=0")
+            # S11 联动：manifest 含表头 + 3 数据行，首列 id 对应打包文档
+            with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+                mlines = zf.read("manifest.txt").decode("utf-8").strip().splitlines()
+            assert mlines[0] == "id\ttitle\tsource", mlines
+            assert len(mlines) == 4, mlines
+            assert {int(l.split("\t")[0]) for l in mlines[1:]} == {d1, d2, d3}, mlines
+            check("1. 正常批量：3 文档 + manifest.txt → 200 / zip 4 条目 / X-Skipped-Count=0")
 
             # ---------- 2. 混入不可见（市场部 D4） ----------
             r = batch(c, token_zs, [d1, d2, d3, d4])
             assert r.status_code == 200, r.text
             assert r.headers.get("x-skipped-count") == "1", r.headers
             names = read_zip_names(r)
-            assert len(names) == 3, f"zip 应 3 个（不含 D4）: {names}"
+            assert len(names) == 4, f"zip 应 3 文档 + manifest.txt（不含 D4）: {names}"
             assert "市场部.txt" not in names, names
             check("2. 混入不可见：加 D4 → 200 + X-Skipped-Count=1，zip 不含 D4")
 
@@ -153,8 +160,8 @@ def main():
             assert r.status_code == 200, r.text
             assert r.headers.get("x-skipped-count") == "1", r.headers
             names = read_zip_names(r)
-            assert names == ["文档A.txt"], names
-            check("3. 混入文件丢失：D1+D5 → 200 + X-Skipped-Count=1，zip 仅 D1")
+            assert set(names) == {"文档A.txt", "manifest.txt"}, names
+            check("3. 混入文件丢失：D1+D5 → 200 + X-Skipped-Count=1，zip 仅 D1 + manifest")
 
             # ---------- 4. 超过 50 / 空列表 / 全不可见 → 400 ----------
             r = batch(c, token_zs, [d1] * 51)

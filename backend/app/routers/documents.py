@@ -9,7 +9,7 @@ import logging
 import uuid
 from pathlib import Path
 from tempfile import SpooledTemporaryFile
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
@@ -38,8 +38,9 @@ BATCH_DOWNLOAD_MAX = 50
 
 
 class BatchDownloadRequest(BaseModel):
-    """批量下载请求体：document_ids（空/超限由路由校验）。"""
-    document_ids: List[int] = Field(default_factory=list)
+    """批量下载请求体：document_ids 不启用 Pydantic 强类型校验（S11 优化 3），
+    非数组/非整数统一由路由内手动校验返回 400（替代 FastAPI 默认 422）。"""
+    document_ids: Any = Field(default_factory=list)
 
 
 def _unique_arcname(used: set, file_name: str) -> str:
@@ -65,6 +66,16 @@ def _unique_arcname(used: set, file_name: str) -> str:
 def file_ext(file_name: str) -> str:
     """提取扩展名（小写，不含点）。"""
     return Path(file_name).suffix.lstrip(".").lower()
+
+
+def _manifest_title(doc) -> str:
+    """manifest 用标题：制表符/换行替换为空格，防错行。"""
+    return "".join(" " if ch in "\t\r\n" else ch for ch in (doc.title or ""))
+
+
+def _manifest_source(doc) -> str:
+    """manifest 来源列：优先 source_url（爬虫），否则 source（upload 等）。"""
+    return doc.source_url or doc.source or ""
 
 
 def save_upload(upload: UploadFile) -> Tuple[str, str, int, str]:
@@ -181,11 +192,17 @@ def batch_download_documents(
     - 每个实际打包的文档写 download 审计（detail.batch=True）。
     - zip 写入 SpooledTemporaryFile（>8MB 自动落盘），StreamingResponse 分块（64KB）输出。
     """
-    if not body.document_ids:
+    # S11 优化 3：非数组 / 非整数 → 统一 400（替代 FastAPI 默认 422）
+    if not isinstance(body.document_ids, list):
+        raise bad_request("document_ids 必须为数组")
+    if any(type(x) is not int for x in body.document_ids):
+        raise bad_request("document_ids 必须为整数数组")
+    ids_raw = body.document_ids
+    if not ids_raw:
         raise bad_request("document_ids 不能为空")
-    if len(body.document_ids) > BATCH_DOWNLOAD_MAX:
+    if len(ids_raw) > BATCH_DOWNLOAD_MAX:
         raise bad_request(f"单次最多下载 {BATCH_DOWNLOAD_MAX} 个文档")
-    ids = list(dict.fromkeys(body.document_ids))  # 去重保序（防御重复提交）
+    ids = list(dict.fromkeys(ids_raw))  # 去重保序（防御重复提交）
 
     docs = db.query(models.Document).filter(models.Document.id.in_(ids)).all()
     docs_by_id = {d.id: d for d in docs}
@@ -216,11 +233,16 @@ def batch_download_documents(
 
     # zip 打包：SpooledTemporaryFile 超 8MB 自动落盘，避免全量进内存
     spool = SpooledTemporaryFile(max_size=8 * 1024 * 1024)
-    used_names = set()
+    used_names = {"manifest.txt"}  # 预占清单名，防用户文件恰名 manifest.txt 冲突（S11 优化 5）
+    manifest_lines = ["id\ttitle\tsource"]
     with ZipFile(spool, "w", ZIP_DEFLATED) as zf:
         for doc in packable:
             target = Path(settings.upload_dir) / doc.file_path
             zf.write(str(target), arcname=_unique_arcname(used_names, doc.file_name))
+            manifest_lines.append(
+                f"{doc.id}\t{_manifest_title(doc)}\t{_manifest_source(doc)}")
+        # 清单作为普通 zip 条目最后写入（条目数 = 文档数 + 1）
+        zf.writestr("manifest.txt", "\n".join(manifest_lines) + "\n")
     spool.seek(0)
 
     def iter_spool():
@@ -312,7 +334,7 @@ def related_documents(document_id: int,
         raise not_found("文档不存在或无权访问")
     if doc.status != models.STATUS_APPROVED:
         return schemas.ok([])
-    vec = vector_store.get_document_vector(document_id)
+    vec = vector_store.get_document_vector(document_id, doc.updated_at)
     if vec is None:
         return schemas.ok([])
     cands = vector_store.query_similar_documents(

@@ -10,6 +10,8 @@
 """
 import logging
 import math
+import threading
+import time
 
 from .config import settings
 
@@ -21,6 +23,46 @@ _client = None
 _collection = None
 
 STATUS_APPROVED = "approved"
+
+# 文档级向量 TTL 缓存（S11 优化 4）：key=(document_id, updated_at)
+# updated_at 变化即失效（Document.updated_at 有 onupdate，任何 UPDATE 自动刷新）；
+# 进程内内存态（本服务单进程运行），TTL 600s + 容量上限 2048 防无界增长。
+VEC_CACHE_TTL = 600          # 秒
+VEC_CACHE_MAX = 2048         # 容量上限
+_vec_cache: dict[tuple[int, str], tuple[float, list[float] | None]] = {}
+_vec_cache_lock = threading.Lock()
+
+
+def _cache_put(key: tuple[int, str], vec: list[float] | None) -> None:
+    """写缓存：惰性删除过期条目；超容量上限时整体清空（保持最简）。"""
+    with _vec_cache_lock:
+        now = time.monotonic()
+        if len(_vec_cache) >= VEC_CACHE_MAX:
+            _vec_cache.clear()
+        else:
+            expired = [k for k, (ts, _) in _vec_cache.items() if now - ts > VEC_CACHE_TTL]
+            for k in expired:
+                _vec_cache.pop(k, None)
+        _vec_cache[key] = (now, vec)
+
+
+def _cache_get(key: tuple[int, str]):
+    """读缓存；未命中返回哨兵（None 结果也缓存，需区分）。"""
+    with _vec_cache_lock:
+        entry = _vec_cache.get(key)
+    if entry is None:
+        return _MISS
+    written_at, vec = entry
+    if time.monotonic() - written_at > VEC_CACHE_TTL:
+        return _MISS  # 过期：视为未命中，后续重算覆盖
+    return vec
+
+
+class _Miss:
+    """缓存未命中哨兵（区别于缓存值为 None 的结果）。"""
+
+
+_MISS = _Miss()
 
 
 def _get_collection():
@@ -100,21 +142,47 @@ def count_by_document(document_id: int) -> int:
         return 0
 
 
-def get_document_vector(document_id: int) -> list[float] | None:
+def reset_collection() -> None:
+    """删除并重建 "chunks" 集合（运维重建向量索引用，服务进程内调用）。"""
+    global _client, _collection
+    _get_collection()  # 确保 client 已初始化（否则 _client 为 None）
+    try:
+        _client.delete_collection("chunks")
+    except Exception:
+        pass
+    _collection = _client.get_or_create_collection(
+        "chunks", metadata={"hnsw:space": "cosine"})
+    logger.info("Chroma 'chunks' 集合已重建")
+
+
+def get_document_vector(document_id: int, updated_at=None) -> list[float] | None:
     """文档级向量（spec F18）：该文档全部 child embedding 逐维平均 + L2 归一化。
 
-    无 child（未入库/非 approved）返回 None。文档多时全量拉取开销见
-    contract-9 §6（本 sprint 不加缓存，保持最简单）。
+    - 无 child（未入库/非 approved）返回 None。
+    - S11 优化 4：key=(document_id, str(updated_at)) 的 TTL 缓存；updated_at 变化即
+      失效（入库/更新/置 failed 均触发 onupdate 刷新）；updated_at 为 None 时跳过
+      缓存（调用方无时间戳则每次重算）。None 结果也缓存（key 含 updated_at 天然失效）。
     """
+    key = None
+    if updated_at is not None:
+        key = (document_id, str(updated_at))
+        cached = _cache_get(key)
+        if cached is not _MISS:
+            return cached
     col = _get_collection()
     res = col.get(where={"document_id": document_id}, include=["embeddings"])
     vecs = res.get("embeddings")
     if vecs is None or len(vecs) == 0:  # numpy 数组不能用 `or` 判真（ambiguous）
+        if key is not None:
+            _cache_put(key, None)
         return None
     n = len(vecs)
     avg = [sum(float(v[i]) for v in vecs) / n for i in range(len(vecs[0]))]
     norm = math.sqrt(sum(x * x for x in avg)) or 1.0
-    return [x / norm for x in avg]
+    vec = [x / norm for x in avg]
+    if key is not None:
+        _cache_put(key, vec)
+    return vec
 
 
 def query_similar_documents(document_vector: list[float], exclude_document_id: int,
