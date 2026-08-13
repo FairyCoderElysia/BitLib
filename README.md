@@ -33,6 +33,21 @@
 - **混合检索 + RAG**：召回阶段权限过滤 → RRF 融合 → CrossEncoder 重排 → small-to-big 回溯 parent → prompt 组装前二次兜底权限过滤 → LLM 生成；
 - **双模式适配**：LLM / Embedding / Reranker 均支持本地模型（Ollama / sentence-transformers）与 OpenAI 兼容 API 切换；切换 embedding 维度触发全量重建向量索引。
 
+### 1.4 增强功能（P2 全部落地）
+
+- **搜索热词与联想**：基于 SearchLog 聚合热词榜（jieba 分词 + 停用词过滤，点击即搜）+ 输入联想下拉（可见性隔离、防抖、缓存）；
+- **文档智能摘要**：入库时 LLM 生成 1-3 句摘要（失败降级为开头片段截取，绝不阻塞入库），检索卡片与详情页展示；管理端可单文档重新生成；
+- **相似文档推荐**：文档级向量（child 平均 + L2 归一化）最近邻检索，详情页“相关推荐”区块，权限过滤 + 排除自身；
+- **爬虫增量更新**：URL + 内容 sha256 双判据——内容不变跳过 / 同 URL 变化**更新原文档**（保留 id，替换分块与向量）/ 新页面新增，运行记录区分 新增/更新/跳过；
+- **批量下载**：收藏页多选打包 zip（流式、≤50、不可见文档自动剔除并提示，含 manifest.txt），搜索页不提供勾选；
+- **问答会话历史**：会话列表/消息历史/续接/删除单条/清空全部，仅本人可见。
+
+### 1.5 检索质量优化（实测调优）
+
+- **FTS 前缀通配**：查询 token 加 `*` 前缀，子词可命中复合词 token（如搜“知识”命中“知识库”）；
+- **查询词覆盖度过滤**：仅覆盖 ≥50% 查询词的文档豁免分数门槛，多词查询只沾泛词（如“企业”）的弱命中仍按重排分数过滤；
+- **重排分数下限**：`rerank_threshold`（默认 0.55）剔除 sigmoid 中性分（0.5）噪音文档，关键词强相关文档无条件保留。
+
 ---
 
 ## 2. 技术架构
@@ -212,17 +227,23 @@ npm run dev
 
 ## 6. 测试
 
-四套后端自动化测试（TestClient + assert），各自使用独立测试库（`data/test_*/`），运行结束自动清理，**不污染正式数据**：
+十套后端自动化测试（TestClient + assert），各自使用独立测试库（`data/test_*/`，含独立 CHROMA_DIR 隔离向量库），运行结束自动清理，**不污染正式数据**：
 
 ```bat
 cd backend
-python scripts\test_m1m2.py    REM M1+M2 认证与角色权限 + 上传审批流 —— 21 断言
-python scripts\test_m3.py      REM M3 解析入库管线（4 格式/清洗/分块/向量/FTS/超长/重试）—— 8 断言
-python scripts\test_m4.py      REM M4 混合检索 + RAG + 收藏夹 + 缓存 —— 9 断言
-python scripts\test_m5.py      REM M5 爬虫入库/去重/SSRF + 推送 + 审计 + 统计 —— 6 断言
+python scripts\test_m1m2.py    REM M1+M2 认证/角色/上传审批流 —— 21 断言
+python scripts\test_m3.py      REM M3 解析入库管线（4格式/清洗/分块/向量/FTS/超长/重试）—— 8 断言
+python scripts\test_m4.py      REM M4 混合检索/RAG/收藏/缓存 —— 9 断言
+python scripts\test_m5.py      REM M5 爬虫/推送/审计/统计 —— 6 断言
+python scripts\test_m6.py      REM M6 热词/联想/缓存失效 —— 10 断言
+python scripts\test_m7.py      REM M7 智能摘要（降级/展示）—— 8 断言
+python scripts\test_m8.py      REM M8 爬虫增量（新增/跳过/更新）—— 6 断言
+python scripts\test_m9.py      REM M9 相似推荐/权限/性能 —— 7 断言
+python scripts\test_m10.py     REM M10 批量下载（剔除/审计/manifest）—— 10 断言
+python scripts\test_m11.py     REM M11 评估优化（FTS同步/缓存/断句/清理）—— 11 断言
 ```
 
-**合计 44 断言，全部 PASS**；另有 `python scripts\seed_demo.py` 播种演示数据。评估结论：**Evaluator PASS 8.9/10**（见 `eval-reports/eval-5.md`），前端经 Playwright E2E 抽查（登录 → 检索 → 预览 → 下载 → 收藏 → 问答 → 审批 → 推送）。
+**合计 96 断言，全部 PASS**；另有 `python scripts\seed_demo.py` 播种演示数据、`python scripts\rebuild_index.py` 重建向量索引（运维）。评估结论：**Evaluator 各 Sprint 均 PASS**（前端 8.9/10，P2 各 7.0~7.4，见 `eval-reports/`），前端经 Playwright E2E 全流程实测（登录 → 检索 → 预览 → 收藏 → 审批 → 热词 → 联想 → 摘要 → 推荐 → 批量下载）。
 
 ---
 
@@ -326,6 +347,8 @@ EMBEDDING_DIM=1536              # 必须与向量库现有维度一致！
 5. **admin 初始密码不知道**：未设置 `ADMIN_INITIAL_PASSWORD` 时，首次启动日志会打印随机初始密码（仅首启播种生效）；请登录后立即修改。
 6. **爬虫 JS 渲染站点抓不到**：首次启用 JS 渲染需联网下载浏览器二进制（约 100MB+）；离线环境自动降级为纯 HTTP 抓取 + 智能正文提取。
 7. **上传大文件超时**：nginx `client_max_body_size` 需与 `MAX_UPLOAD_MB`（默认 200MB）一致；上传后解析入库在后台异步执行，不阻塞接口。
+8. **服务重启后检索短暂异常（Chroma HNSW）**：Windows 下 chromadb 持久化脆弱，异常退出（强杀）或多进程共享目录可能损坏 HNSW 索引。已内置**启动自愈**——启动时检测索引可加载性，损坏则自动在服务进程内重建（约 1 分钟/10 文档，期间检索自动降级为关键词路，不 500）；也可手动 `POST /api/admin/rebuild-index` 立即重建。
+9. **Chroma 多进程警告**：`PersistentClient` **不支持多进程共享同一目录**（并发写会损坏 HNSW 索引）。务必：测试脚本隔离 `CHROMA_DIR`（已内置）；生产保持单 uvicorn 进程（勿开多 workers）；重建必须经服务内接口或启动自愈，勿用独立进程脚本写同一目录。
 
 ---
 
@@ -336,3 +359,4 @@ EMBEDDING_DIM=1536              # 必须与向量库现有维度一致！
 | `README.md` | 部署与使用指南（本文件） |
 | `backend/.env.example` | 环境配置模板（复制为 .env 使用） |
 | `backend/scripts/backup.py` | 数据备份脚本 |
+| `backend/scripts/rebuild_index.py` | 向量索引重建脚本（运维，推荐用服务内接口） |
