@@ -1,4 +1,4 @@
-# M1/M2 已使用（均已安装，不新增）
+# 核心依赖
 fastapi
 uvicorn[standard]
 sqlalchemy>=2.0
@@ -10,11 +10,18 @@ python-multipart
 httpx
 chardet
 
-# 后续 sprint（M3+）再启用，勿在本轮安装
-# python-docx      # M3 解析 docx
-# PyMuPDF          # M3 解析 pdf
-# chromadb         # M3 向量库
-# jieba            # M3 FTS 中文分词
-# sentence-transformers  # M3 本地 embedding（体积大）
-# redis            # M4 可选缓存
-# apscheduler      # M5 爬虫定时
+# 文档解析与向量/AI（M3+）
+python-docx
+PyMuPDF
+chromadb==1.5.9          # 锁定：1.x Rust 后端为当前环境可用版本；勿随意升级/降级
+jieba
+sentence-transformers
+tokenizers==0.22.2       # 锁定：与 transformers/sentence-transformers 兼容（0.20/0.23.1 均会破坏）
+transformers==5.15.0     # 锁定：随 tokenizers 版本配套
+redis                     # 可选缓存（未配置降级内存）
+apscheduler               # 爬虫定时
+scrapling                 # 爬虫抓取引擎
+
+# 说明：chromadb PersistentClient 不支持多进程共享同一目录（并发写会损坏 HNSW 索引）。
+# 测试脚本必须隔离 CHROMA_DIR（独立目录）；生产保持单 uvicorn 进程；
+# 向量索引重建必须经服务内接口（POST /api/admin/rebuild-index）或启动自愈，勿用独立进程脚本。
