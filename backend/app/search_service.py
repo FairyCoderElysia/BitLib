@@ -60,11 +60,19 @@ def keyword_recall(db: Session, user: models.User, query: str, top_k: int = RECA
 
 
 def semantic_recall(db: Session, user: models.User, query: str, top_k: int = RECALL_TOP_K) -> list[dict]:
-    """语义路：Embedding → Chroma 召回（metadata 可见性过滤）。返回含 parent_id 的命中。"""
-    emb = embed([query])[0]
-    return vector_query(emb, top_k,
-                        user_department_id=user.department_id,
-                        is_admin=user.role == models.ROLE_ADMIN)
+    """语义路：Embedding → Chroma 召回（metadata 可见性过滤）。返回含 parent_id 的命中。
+
+    Chroma 不可用（HNSW 重建窗口/损坏）时降级返回空，检索回退关键词路而非 500
+    （spec §7.2：重建期间检索降级为关键词路）。
+    """
+    try:
+        emb = embed([query])[0]
+        return vector_query(emb, top_k,
+                            user_department_id=user.department_id,
+                            is_admin=user.role == models.ROLE_ADMIN)
+    except Exception as exc:
+        logger.warning("语义召回失败，降级关键词路（Chroma 不可用/索引重建中）: %s", exc)
+        return []
 
 
 def rrf_fuse(ranked_lists: list[list[int]], k: int = RRF_K) -> list[tuple[int, float]]:

@@ -29,9 +29,9 @@ def main():
         for doc in docs:
             db.expunge(doc)
             if doc.file_path:
-                ingest_document(db, doc)          # 上传文档：读文件重入库
+                ingest_document(db, doc, regen_summary=False)  # 保留已有 summary，提速
             else:
-                ingest_text(db, doc, doc.content_text or "")  # 爬虫文档：文本重入库
+                ingest_text(db, doc, doc.content_text or "", regen_summary=False)
             db.refresh(doc)
             if doc.status == models.STATUS_APPROVED:
                 ok += 1

@@ -69,9 +69,9 @@ def _ensure_vector_health() -> None:
                 ok = 0
                 for doc in docs:
                     if doc.file_path:
-                        ingest_document(db, doc)
+                        ingest_document(db, doc, regen_summary=False)
                     else:
-                        ingest_text(db, doc, doc.content_text or "")
+                        ingest_text(db, doc, doc.content_text or "", regen_summary=False)
                     db.refresh(doc)
                     if doc.status == models.STATUS_APPROVED:
                         ok += 1

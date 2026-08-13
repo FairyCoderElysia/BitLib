@@ -22,21 +22,26 @@ from .summary import generate_summary
 logger = logging.getLogger(__name__)
 
 
-def ingest_document(db: Session, doc: models.Document) -> models.Document:
-    """对已置 processing 的文档执行完整入库管线（文件来源）。返回更新后的 doc（已 commit）。"""
+def ingest_document(db: Session, doc: models.Document,
+                    regen_summary: bool = True) -> models.Document:
+    """对已置 processing 的文档执行完整入库管线（文件来源）。返回更新后的 doc（已 commit）。
+
+    regen_summary=False：保留已有 summary，不重调 LLM（向量索引重建时提速）。
+    """
     try:
         path = Path(settings.upload_dir) / doc.file_path
         raw = parse_file(path)
-        _run_pipeline(db, doc, raw)
+        _run_pipeline(db, doc, raw, regen_summary)
     except Exception as exc:
         _mark_failed(db, doc, exc)
     return doc
 
 
-def ingest_text(db: Session, doc: models.Document, raw_text: str) -> models.Document:
+def ingest_text(db: Session, doc: models.Document, raw_text: str,
+                regen_summary: bool = True) -> models.Document:
     """文本直接入库（爬虫等无文件来源）。返回更新后的 doc（已 commit）。"""
     try:
-        _run_pipeline(db, doc, raw_text)
+        _run_pipeline(db, doc, raw_text, regen_summary)
     except Exception as exc:
         _mark_failed(db, doc, exc)
     return doc
@@ -57,7 +62,8 @@ def _mark_failed(db: Session, doc: models.Document, exc: Exception) -> None:
     logger.error("文档 %s 入库失败: %s", doc.id, exc)
 
 
-def _run_pipeline(db: Session, doc: models.Document, raw: str) -> None:
+def _run_pipeline(db: Session, doc: models.Document, raw: str,
+                  regen_summary: bool = True) -> None:
 
     # 2. 清洗 + 过短拦截
     text = clean_text(raw)
@@ -116,8 +122,10 @@ def _run_pipeline(db: Session, doc: models.Document, raw: str) -> None:
 
     # 8. 更新文档 + FTS 同步
     doc.content_text = text
-    # 摘要生成（F17）：LLM 失败内部已降级截取，绝不抛错、不影响入库状态
-    doc.summary = generate_summary(doc)
+    # 摘要生成（F17）：LLM 失败内部已降级截取，绝不抛错、不影响入库状态；
+    # 重建场景（regen_summary=False）保留已有 summary，跳过 LLM 调用以提速
+    if regen_summary:
+        doc.summary = generate_summary(doc)
     doc.status = models.STATUS_APPROVED
     doc.error_message = None
     doc.approved_at = doc.approved_at or datetime.utcnow()
