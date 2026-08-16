@@ -31,6 +31,18 @@ def _default_scorer() -> Callable[[list[tuple[str, str]]], list[float]]:
     return _scorer_cache
 
 
+def warm_up() -> bool:
+    """预热重排模型。加载成功返回 True；加载失败抛异常；reranker 未启用返回 False。
+
+    供 main.py 启动预热使用：只有真正完成 CrossEncoder 加载才返回 True，
+    避免把“rerank() 内部降级返回”误判为“预热完成”。
+    """
+    if not settings.reranker_enabled:
+        return False
+    _default_scorer()
+    return True
+
+
 def rerank(query: str, candidates: list[dict], limit: int = 5,
            scorer: Optional[Callable[[list[tuple[str, str]]], list[float]]] = None) -> list[dict]:
     """对候选精排取 topN。candidates: [{document_id, text, rrf, is_featured, ...}]。
