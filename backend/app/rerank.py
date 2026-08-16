@@ -47,10 +47,10 @@ def rerank(query: str, candidates: list[dict], limit: int = 5,
         candidates.sort(key=lambda c: -c["score"])
         return candidates[:limit]
 
-    if scorer is None:
-        scorer = _default_scorer()
     pairs = [(query, c["text"]) for c in candidates]
     try:
+        if scorer is None:
+            scorer = _default_scorer()
         scores = scorer(pairs)
     except Exception as exc:
         logger.warning("重排失败，降级 RRF 排序: %s", exc)
