@@ -178,7 +178,8 @@ export const searchApi = {
 export const qaApi = {
   /** 提问 → { session_id, answer, citations, confidence } */
   ask(body) {
-    return unwrap(http.post('/qa/ask', body))
+    // S3：AI 问答首问可能叠加 embedding/reranker 冷加载，客户端超时与后端 LLM 180s 对齐
+    return unwrap(http.post('/qa/ask', body, { timeout: 180000 }))
   },
   /** 会话列表（修复#4） */
   listSessions(params) {

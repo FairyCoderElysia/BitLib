@@ -90,15 +90,32 @@ def _ensure_vector_health() -> None:
 
 
 def _prewarm() -> None:
-    """后台线程预热 embedding 模型；失败不阻塞启动（首次使用时再加载）。"""
+    """后台线程预热 embedding 与 reranker 模型；失败不阻塞启动（首次使用时再加载）。"""
 
     def _load():
+        # embedding 预热：与 S3 之前行为一致，失败不阻塞启动
         try:
             from .embeddings import embed
             embed(["预热"])
             logger.info("embedding 模型预热完成")
         except Exception as exc:
             logger.warning("embedding 模型预热失败（首次使用时再加载）: %s", exc)
+
+        # reranker 预热：仅 reranker_enabled=true 时加载。
+        # 复用 rerank() 触发 _default_scorer() 加载 CrossEncoder；
+        # 传入单个 dummy 候选只为触发模型加载，不涉及任何真实业务文档。
+        try:
+            if settings.reranker_enabled:
+                from .rerank import rerank
+                rerank("预热", [{
+                    "document_id": -1,
+                    "text": "预热",
+                    "rrf": 0.0,
+                    "is_featured": False,
+                }], limit=1)
+                logger.info("reranker 模型预热完成")
+        except Exception as exc:
+            logger.warning("reranker 模型预热失败（首次使用时再加载）: %s", exc)
 
     import threading
     threading.Thread(target=_load, daemon=True).start()
