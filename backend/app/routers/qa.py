@@ -186,9 +186,9 @@ def _build_context_and_citations(db: Session, hits: list, question: str):
             parents = _select_parents_by_keyword(db, doc, question,
                                                  MAX_PARENTS_PER_DOC)
         for p in parents:
+            if len(contexts) >= CONTEXT_MAX_BLOCKS:
+                return contexts, citations
             _append_parent_context(contexts, citations, doc, p)
-        if len(contexts) >= CONTEXT_MAX_BLOCKS:
-            break
     return contexts, citations
 
 
@@ -216,9 +216,9 @@ def _reuse_last_citations(db: Session, user: models.User, question: str,
             continue
         parents = _select_parents_by_keyword(db, doc, question, MAX_PARENTS_PER_DOC)
         for p in parents:
+            if len(contexts) >= CONTEXT_MAX_BLOCKS:
+                return contexts, citations
             _append_parent_context(contexts, citations, doc, p)
-        if len(contexts) >= CONTEXT_MAX_BLOCKS:
-            break
     return contexts, citations
 
 

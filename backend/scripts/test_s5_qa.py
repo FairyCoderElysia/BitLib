@@ -278,6 +278,23 @@ def main():
                 assert q4_citations[0]["snippet"] == "Q4文档0第0块内容"[:150], q4_citations[0]
                 check("Q4. 上下文全局上限 8 块/每文档 2 块，citations 与上下文一一对应")
 
+                # ---------- Q4 off-by-one 回归（S6） ----------
+                q4b_docs = []
+                for i in range(7):
+                    _, q4b_doc = make_doc(f"Q4b单块{i}", [f"Q4b单块{i}内容"])
+                    q4b_docs.append(q4b_doc)
+                q4b_did8, q4b_doc8 = make_doc("Q4b双块", ["Q4b双块第0块内容", "Q4b双块第1块内容"])
+                q4b_docs.append(q4b_doc8)
+                with SessionLocal() as db:
+                    q4b_hits = [{"document": d, "parent_ids": [0]} for d in q4b_docs[:7]]
+                    q4b_hits.append({"document": q4b_doc8, "parent_ids": [0, 1]})
+                    q4b_contexts, q4b_citations = qa_mod._build_context_and_citations(
+                        db, q4b_hits, "测试问题")
+                assert len(q4b_contexts) == 8, f"全局应为 8 块，实际 {len(q4b_contexts)}"
+                assert len(q4b_citations) == 8, f"citations 应为 8 条，实际 {len(q4b_citations)}"
+                assert q4b_citations[-1]["chunk_index"] == 0 and q4b_citations[-1]["title"] == "Q4b双块", q4b_citations[-1]
+                check("Q4-S6. off-by-one 回归：前 7 文档各 1 块 + 末文档 2 块时全局仍为 8 块")
+
                 # ---------- Q5 ----------
                 q5_texts = [
                     "该文档的唯一有效 parent 块，但不在 semantic parent_ids 中。",
