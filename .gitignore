@@ -32,3 +32,6 @@ Thumbs.db
 docs/
 spec.md
 PROJECT_SUMMARY.md
+
+# clarify-harness 协调工件（不参与运行，不入库）
+harness/
