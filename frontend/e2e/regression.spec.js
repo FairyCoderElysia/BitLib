@@ -1,0 +1,156 @@
+import { test as base, expect } from '@playwright/test';
+
+// Playwright 原生 tag 要求 '@' 前缀（如 '@L0'），而 sprint contract E4 固定格式为
+// tag: ['L0', 'affects:auth,search']。这里用一层极薄包装，把 contract 格式归一化为
+// Playwright 原生 tag（每个 tag 前补 '@'），测试文件源码保持 contract 要求的格式。
+const test = (title, details, body) => {
+  const nativeDetails = { ...details };
+  if (Array.isArray(details.tag)) {
+    nativeDetails.tag = details.tag.map((t) => (t.startsWith('@') ? t : `@${t}`));
+  } else if (typeof details.tag === 'string') {
+    nativeDetails.tag = details.tag
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((t) => (t.startsWith('@') ? t : `@${t}`))
+      .join(' ');
+  }
+  return base(title, nativeDetails, body);
+};
+
+const API = 'http://127.0.0.1:8000/api';
+const WEB = 'http://127.0.0.1:5173';
+const ADMIN_INITIAL_PASSWORD = 'Admin@123456';
+const ADMIN_CHANGED_PASSWORD = 'Admin@654321';
+
+// 测试按声明顺序串行执行（playwright.config.js: workers=1, fullyParallel=false）。
+// 首个 L1 用例会把 admin 密码从初始值改为固定新值，后续用例共享该新值。
+let adminPassword = ADMIN_INITIAL_PASSWORD;
+
+test('L0 健康检查与登录页可达', { tag: ['L0', 'affects:auth,infra'] }, async ({ request, page }) => {
+  const res = await request.get(`${API}/health`);
+  expect(res.status()).toBe(200);
+  const body = await res.json();
+  expect(body.code).toBe(0);
+
+  await page.goto(`${WEB}/login`);
+  await expect(page.getByText('企业资料管理系统')).toBeVisible();
+  await expect(page.getByLabel('账号')).toBeVisible();
+  await expect(page.getByLabel('密码')).toBeVisible();
+});
+
+test('L1 admin 首登强制改密并进入检索页', { tag: ['L1', 'affects:auth,search'] }, async ({ page }) => {
+  await page.goto(`${WEB}/login`);
+  await page.getByLabel('账号').fill('admin');
+  await page.getByLabel('密码').fill(ADMIN_INITIAL_PASSWORD);
+  await page.getByRole('button', { name: '登 录' }).click();
+
+  // 首登强制改密：登录后必须跳转改密页
+  await expect(page).toHaveURL(/change-password/);
+  await expect(page.getByText('修改初始密码')).toBeVisible();
+
+  await page.getByLabel('原密码').fill(ADMIN_INITIAL_PASSWORD);
+  await page.getByPlaceholder('至少 6 位，且不能与旧密码相同').fill(ADMIN_CHANGED_PASSWORD);
+  await page.getByPlaceholder('再次输入新密码').fill(ADMIN_CHANGED_PASSWORD);
+  await page.getByRole('button', { name: '确认修改' }).click();
+
+  // 改密成功进入检索页（真实浏览器断言）
+  await expect(page).toHaveURL(/search/);
+  await expect(page.getByPlaceholder('输入关键词搜索文档（支持标题 / 内容全文检索）')).toBeVisible();
+
+  adminPassword = ADMIN_CHANGED_PASSWORD;
+});
+
+test('L1 资料主流程：普通用户上传 → 管理员审批 → 检索可见', { tag: ['L1', 'affects:auth,approval,search'] }, async ({ request, page, browser }) => {
+  const unique = Date.now();
+  const username = `e2e_user_${unique}`;
+  const userPassword = 'User@123456';
+  const title = `E2E回归测试文档_${unique}`;
+  const uniquePhrase = `蓝鲸回归验证串${unique}`;
+  const content = `${uniquePhrase}。本文档用于验证企业资料管理系统端到端回归链路：普通用户上传文档后，管理员在审批中心审批通过，文档完成解析入库，随后普通用户能够在检索页搜索到该文档。`;
+
+  // ---------- API 准备：建普通用户 + 普通用户上传（关键步骤走 UI） ----------
+  const adminLogin = await request.post(`${API}/auth/login`, {
+    data: { username: 'admin', password: adminPassword },
+  });
+  expect(adminLogin.status()).toBe(200);
+  const adminLoginBody = await adminLogin.json();
+  expect(adminLoginBody.code).toBe(0);
+  const adminToken = adminLoginBody.data.token;
+  const adminHeaders = { Authorization: `Bearer ${adminToken}` };
+
+  const deptRes = await request.get(`${API}/auth/departments`, { headers: adminHeaders });
+  expect(deptRes.status()).toBe(200);
+  const deptBody = await deptRes.json();
+  const departmentId = deptBody.data[0].id;
+
+  const createRes = await request.post(`${API}/admin/users`, {
+    headers: adminHeaders,
+    data: { username, password: userPassword, role: 'user', department_id: departmentId },
+  });
+  expect(createRes.status()).toBe(200);
+  expect((await createRes.json()).code).toBe(0);
+
+  const userLogin = await request.post(`${API}/auth/login`, {
+    data: { username, password: userPassword },
+  });
+  expect(userLogin.status()).toBe(200);
+  const userLoginBody = await userLogin.json();
+  expect(userLoginBody.code).toBe(0);
+  const userToken = userLoginBody.data.token;
+  const userHeaders = { Authorization: `Bearer ${userToken}` };
+
+  const uploadRes = await request.post(`${API}/documents/upload`, {
+    headers: userHeaders,
+    multipart: {
+      file: {
+        name: 'e2e-regression.txt',
+        mimeType: 'text/plain',
+        buffer: Buffer.from(content, 'utf-8'),
+      },
+      title,
+    },
+  });
+  expect(uploadRes.status()).toBe(200);
+  const uploadBody = await uploadRes.json();
+  expect(uploadBody.code).toBe(0);
+  const documentId = uploadBody.data.id;
+
+  // ---------- UI：管理员审批通过 ----------
+  await page.goto(`${WEB}/login`);
+  await page.getByLabel('账号').fill('admin');
+  await page.getByLabel('密码').fill(adminPassword);
+  await page.getByRole('button', { name: '登 录' }).click();
+  await expect(page).toHaveURL(/search/);
+
+  await page.goto(`${WEB}/admin/approvals`);
+  await expect(page.getByRole('heading', { name: '审批中心' })).toBeVisible();
+
+  const row = page.getByRole('row', { name: new RegExp(title) });
+  await expect(row).toBeVisible();
+  await row.getByRole('button', { name: '通过' }).click();
+  await page.getByRole('button', { name: '确定' }).click();
+  // 审批成功后待审批列表会刷新，该行消失（比等待 ElMessage 瞬时消息更稳健）
+  await expect(row).toHaveCount(0, { timeout: 45_000 });
+
+  // ---------- UI：普通用户登录并检索到该文档（真实浏览器断言） ----------
+  const userContext = await browser.newContext();
+  try {
+    const userPage = await userContext.newPage();
+    await userPage.goto(`${WEB}/login`);
+    await userPage.getByLabel('账号').fill(username);
+    await userPage.getByLabel('密码').fill(userPassword);
+    await userPage.getByRole('button', { name: '登 录' }).click();
+    await expect(userPage).toHaveURL(/search/);
+
+    await userPage.getByPlaceholder('输入关键词搜索文档（支持标题 / 内容全文检索）').fill(uniquePhrase);
+    await userPage.getByRole('button', { name: '搜索' }).click();
+    await expect(userPage.getByText(title)).toBeVisible();
+  } finally {
+    await userContext.close();
+  }
+});
+
+test('L0 失败注入冒烟（teardown 清理验证专用）', { tag: ['L0', 'affects:infra'] }, async () => {
+  base.skip(process.env.EDMS_E2E_FORCE_FAIL !== '1', '未设置 EDMS_E2E_FORCE_FAIL，跳过失败注入');
+  expect(1).toBe(2);
+});

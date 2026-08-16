@@ -247,6 +247,18 @@ python scripts\test_m11.py     REM M11 评估优化（FTS同步/缓存/断句/�
 
 **合计 96 断言，全部 PASS**；另有 `python scripts\seed_demo.py` 播种演示数据、`python scripts\rebuild_index.py` 重建向量索引（运维）。评估结论：**Evaluator 各 Sprint 均 PASS**（前端 8.9/10，P2 各 7.0~7.4，见 `eval-reports/`），前端经 Playwright E2E 全流程实测（登录 → 检索 → 预览 → 收藏 → 审批 → 热词 → 联想 → 摘要 → 推荐 → 批量下载）。
 
+### 6.1 Playwright E2E 回归（S2）
+
+**安装**：`cd frontend && npm install`（已包含 `@playwright/test`；浏览器优先使用系统 Edge/Chrome，不下载 Playwright 浏览器二进制）。
+
+**运行**：`cd frontend && npm run test:e2e`
+
+- **自包含启动**：该命令会自行启动测试后端（uvicorn，`127.0.0.1:8000`）与前端（Vite，`127.0.0.1:5173`），运行前无需人工预启动服务；测试结束后自动停止前后端进程。
+- **数据隔离**：启动器显式设置 `DATABASE_URL`、`UPLOAD_DIR`、`CHROMA_DIR` 指向系统临时目录下统一前缀 `edms-e2e-` 的独立测试数据目录，不读写正式 `backend/data`。三个实际生效路径会在启动后端前打印到 stdout，并写入 `frontend/e2e/.run-env.json`（该文件本地保留，不入库）。
+- **自动清理**：无论用例 PASS 还是 FAIL，teardown 都会清理测试数据根目录，不残留测试数据库/上传文件/向量库。可用 `EDMS_E2E_FORCE_FAIL=1 npm run test:e2e` 验证 FAIL 分支清理仍生效。
+- **前置条件**：启动器显式设置 `ADMIN_INITIAL_PASSWORD=Admin@123456`，不依赖 `backend/.env`；后端依赖已安装（见 §4.1），本地 embedding 模型已缓存（或首次运行可下载）。
+- **失败注入**：`EDMS_E2E_FORCE_FAIL=1` 时，专用 smoke 用例必定失败，用于验证 teardown 清理。
+
 ---
 
 ## 7. 部署

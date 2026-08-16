@@ -1,0 +1,8 @@
+# E2E 运行时标记文件（本地保留，不入库）
+e2e/.run-env.json
+e2e/.run-procs.json
+e2e/.run-state.json
+
+# Playwright 报告与失败截图
+playwright-report/
+test-results/
