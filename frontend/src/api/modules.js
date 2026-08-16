@@ -15,6 +15,10 @@ export const authApi = {
   me() {
     return unwrap(http.get('/auth/me'))
   },
+  /** 自助修改密码（F1 修复） */
+  changePassword(old_password, new_password) {
+    return unwrap(http.post('/auth/change-password', { old_password, new_password }))
+  },
   /** 部门列表 */
   departments() {
     return unwrap(http.get('/auth/departments'))
@@ -74,6 +78,12 @@ export const adminApi = {
   /** 审批拒绝（附原因） */
   reject(id, reason) {
     return unwrap(http.post(`/admin/pending/${id}/reject`, { reason }))
+  },
+  /** 批量审批（F15 修复）：action=approve|reject，document_ids 整数数组，reject 需 reason */
+  batchPending(action, document_ids, reason) {
+    const payload = { action, document_ids }
+    if (reason != null) payload.reason = reason
+    return unwrap(http.post('/admin/pending/batch', payload))
   },
   /** 文档管理列表（分页 + 筛选） */
   documents(params) {

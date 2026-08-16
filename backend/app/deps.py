@@ -45,3 +45,10 @@ def require_dept_admin(current_user: models.User = Depends(get_current_user)) ->
     if current_user.role not in (models.ROLE_ADMIN, models.ROLE_DEPT_ADMIN):
         raise forbidden()
     return current_user
+
+
+def require_password_changed(current_user: models.User = Depends(get_current_user)) -> models.User:
+    """预留依赖（本次不接入路由）：后端强制首登改密。"""
+    if current_user.must_change_password:
+        raise forbidden("请先修改初始密码")
+    return current_user

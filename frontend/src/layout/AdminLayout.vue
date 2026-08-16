@@ -40,6 +40,7 @@
             <template #dropdown>
               <el-dropdown-menu>
                 <el-dropdown-item disabled>角色：{{ roleText }}</el-dropdown-item>
+                <el-dropdown-item command="change-password" :icon="Lock">修改密码</el-dropdown-item>
                 <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
               </el-dropdown-menu>
             </template>
@@ -60,7 +61,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import {
   Odometer, Stamp, FolderOpened, Promotion, User, Bell, Document,
-  DataBoard, House, ArrowDown, OfficeBuilding,
+  DataBoard, House, ArrowDown, OfficeBuilding, Lock,
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -93,7 +94,9 @@ const currentTitle = computed(() => {
 })
 
 function onCommand(cmd) {
-  if (cmd === 'logout') {
+  if (cmd === 'change-password') {
+    router.push('/change-password')
+  } else if (cmd === 'logout') {
     userStore.logout()
     router.push('/login')
   }

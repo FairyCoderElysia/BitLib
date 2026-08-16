@@ -55,6 +55,7 @@ class User(Base):
     password_hash = Column(String(128), nullable=False)  # bcrypt 哈希
     role = Column(String(16), nullable=False, default=ROLE_USER)  # admin/dept_admin/user
     department_id = Column(Integer, ForeignKey("department.id"), nullable=True)  # 空=无部门
+    must_change_password = Column(Boolean, default=False)  # 首登强制改密（F1 修复）
     created_at = Column(DateTime, default=datetime.utcnow)
 
     department = relationship("Department", back_populates="users")

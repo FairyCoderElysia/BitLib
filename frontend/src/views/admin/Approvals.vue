@@ -171,7 +171,55 @@ function openPreview(row) {
   previewVisible.value = true
 }
 
-/** 单条通过 */
+function openReject(row) {
+  rejectDoc.value = row
+  rejectReason.value = ''
+  rejectVisible.value = true
+}
+
+/** 批量通过：调用批量接口，部分失败按 results 逐条提示（F15 修复） */
+async function handleBatch() {
+  try {
+    await ElMessageBox.confirm(`确定通过选中的 ${selected.value.length} 个文档吗？`, '批量通过', { type: 'warning' })
+  } catch (e) {
+    return
+  }
+  batchLoading.value = true
+  try {
+    const res = await adminApi.batchPending('approve', selected.value.map((d) => d.id))
+    reportBatch('通过', res)
+  } catch (e) {
+    /* 拦截器已提示 */
+  } finally {
+    batchLoading.value = false
+    selected.value = []
+    fetchList()
+  }
+}
+
+/** 批量拒绝：先弹原因输入，再调用批量接口 */
+async function handleBatchReject() {
+  const { value } = await ElMessageBox.prompt('请输入拒绝原因（上传者可见）', '批量拒绝', {
+    inputType: 'textarea',
+    inputPlaceholder: '原因将应用到全部选中项',
+    inputValidator: (v) => (v && v.trim() ? true : '拒绝原因不能为空'),
+  }).catch(() => null)
+  if (value == null) return
+  rejectReason.value = value
+  batchLoading.value = true
+  try {
+    const res = await adminApi.batchPending('reject', selected.value.map((d) => d.id), rejectReason.value.trim())
+    reportBatch('拒绝', res)
+  } catch (e) {
+    /* 拦截器已提示 */
+  } finally {
+    batchLoading.value = false
+    selected.value = []
+    fetchList()
+  }
+}
+
+/** 单条通过（保留单条接口） */
 async function handleApprove(row) {
   try {
     await ElMessageBox.confirm(`确定通过「${row.title}」的审批吗？`, '审批通过', { type: 'warning' })
@@ -187,81 +235,30 @@ async function handleApprove(row) {
   }
 }
 
-function openReject(row) {
-  rejectDoc.value = row
-  rejectReason.value = ''
-  rejectVisible.value = true
-}
-
-/** 单条 / 批量拒绝 */
+/** 单条拒绝（保留单条接口） */
 async function submitReject() {
-  const list = rejectDoc.value ? [rejectDoc.value] : selected.value
-  await doReject(list)
-}
-
-/** 批量通过 */
-async function handleBatch() {
+  if (!rejectDoc.value) return
+  rejectLoading.value = true
   try {
-    await ElMessageBox.confirm(`确定通过选中的 ${selected.value.length} 个文档吗？`, '批量通过', { type: 'warning' })
+    await adminApi.reject(rejectDoc.value.id, rejectReason.value.trim())
+    ElMessage.success(`「${rejectDoc.value.title}」已拒绝`)
+    closeRejectDialog()
+    fetchList()
   } catch (e) {
-    return
+    /* 拦截器已提示 */
+  } finally {
+    rejectLoading.value = false
   }
-  await doApprove(selected.value)
 }
 
-/** 批量拒绝：先弹原因输入 */
-async function handleBatchReject() {
-  const { value } = await ElMessageBox.prompt('请输入拒绝原因（上传者可见）', '批量拒绝', {
-    inputType: 'textarea',
-    inputPlaceholder: '原因将应用到全部选中项',
-    inputValidator: (v) => (v && v.trim() ? true : '拒绝原因不能为空'),
-  }).catch(() => null)
-  if (value == null) return
-  rejectReason.value = value
-  await doReject(selected.value)
-}
-
-/** 循环调用通过；部分失败时提示明细（id + 原因） */
-async function doApprove(list) {
-  batchLoading.value = true
-  const failed = []
-  for (const doc of list) {
-    try {
-      await adminApi.approve(doc.id)
-    } catch (e) {
-      failed.push({ title: doc.title, msg: e?.message || '请求失败' })
-    }
-  }
-  batchLoading.value = false
-  reportResult('通过', list.length, failed)
-  closeRejectDialog()
-  fetchList()
-}
-
-/** 循环调用拒绝；部分失败时提示明细 */
-async function doReject(list) {
-  batchLoading.value = true
-  const failed = []
-  for (const doc of list) {
-    try {
-      await adminApi.reject(doc.id, rejectReason.value.trim())
-    } catch (e) {
-      failed.push({ title: doc.title, msg: e?.message || '请求失败' })
-    }
-  }
-  batchLoading.value = false
-  reportResult('拒绝', list.length, failed)
-  closeRejectDialog()
-  fetchList()
-}
-
-function reportResult(action, totalCount, failed) {
-  const ok = totalCount - failed.length
+function reportBatch(action, res) {
+  const failed = (res.results || []).filter((r) => !r.success)
   if (failed.length) {
-    const detail = failed.map((f) => `${f.title}（${f.msg}）`).join('；')
-    ElMessage.warning(`成功 ${action} ${ok} 个，失败 ${failed.length} 个：${detail}`)
+    const selectedMap = new Map(selected.value.map((d) => [d.id, d.title]))
+    const detail = failed.map((r) => `${selectedMap.get(r.id) || r.id}（${r.message}）`).join('；')
+    ElMessage.warning(`成功${action} ${res.succeeded} 个，失败 ${res.failed} 个：${detail}`)
   } else {
-    ElMessage.success(`已${action} ${ok} 个文档`)
+    ElMessage.success(`已${action} ${res.succeeded} 个文档`)
   }
 }
 

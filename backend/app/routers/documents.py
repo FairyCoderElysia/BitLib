@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from .. import models, schemas, vector_store
+from .. import document_update, models, schemas, vector_store
 from ..audit import client_ip, log_action
 from ..config import settings
 from ..db import get_db
@@ -126,17 +126,43 @@ def find_duplicate(db: Session, sha256_hex: str) -> Optional[models.Document]:
     ).first()
 
 
-def _build_document(db: Session, upload: UploadFile, title: str,
+def _prepare_upload(db: Session, upload: UploadFile, title: str,
                     department_id: Optional[int], source: str,
-                    uploaded_by: int) -> models.Document:
-    """公共上传逻辑：落盘 + 去重 + 建 pending/processing 记录。"""
+                    uploaded_by: int,
+                    update_if_duplicate: bool = False,
+                    current_user: Optional[models.User] = None,
+                    upload_source_label: str = "user_upload",
+                    request: Optional[Request] = None) -> Tuple[models.Document, bool]:
+    """公共上传逻辑：落盘 + sha256 去重 + 建 pending 记录或更新为新版本。
+
+    返回 (doc, is_update)：
+    - is_update=False：新建文档记录（pending），由调用方继续处理与审计。
+    - is_update=True：已通过 document_update 更新为新版本（已入库、已审计），调用方勿重复审计。
+    """
     ext, store_name, size, sha256_hex = save_upload(upload)
 
     dup = find_duplicate(db, sha256_hex)
     if dup is not None:
-        Path(settings.upload_dir, store_name).unlink(missing_ok=True)
-        raise conflict("该文件已存在", detail={"document_id": dup.id,
-                                              "hint": "可改用直入库/更新为新版本（F8）"})
+        if not update_if_duplicate:
+            Path(settings.upload_dir, store_name).unlink(missing_ok=True)
+            raise conflict("该文件已存在", detail={
+                "document_id": dup.id,
+                "title": dup.title,
+                "status": dup.status,
+                "can_update": document_update.can_update_document(current_user, dup)
+                if current_user else False,
+                "hint": "如具备更新权限，可带 update_if_duplicate=true 更新为新版本",
+            })
+        # 注意：更新通道保留新落盘文件；成功时 ingest_document_update 会把 doc.file_path
+        # 切到新文件并删除旧文件，失败时由它清理新文件；权限/状态校验失败（403/400）此处兜底删除新文件
+        try:
+            doc = document_update.update_document_from_upload(
+                db, current_user, dup, store_name, size, sha256_hex,
+                source_label=upload_source_label, request=request)
+        except Exception:
+            Path(settings.upload_dir, store_name).unlink(missing_ok=True)
+            raise
+        return doc, True
 
     file_name = upload.filename or store_name
     doc_title = (title or "").strip() or Path(file_name).stem
@@ -155,7 +181,7 @@ def _build_document(db: Session, upload: UploadFile, title: str,
     db.add(doc)
     db.commit()
     db.refresh(doc)
-    return doc
+    return doc, False
 
 
 @router.post("/upload")
@@ -163,17 +189,27 @@ def upload_document(
     request: Request,
     file: UploadFile = File(...),
     title: str = Form(""),
+    update_if_duplicate: bool = Form(False),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """普通用户上传：→ pending，归属上传者部门（无部门=公开）。"""
-    doc = _build_document(db, file, title,
-                          department_id=current_user.department_id,
-                          source=models.SOURCE_UPLOAD,
-                          uploaded_by=current_user.id)
-    log_action(db, current_user, "upload", "document", doc.id,
-               {"file_name": doc.file_name, "file_size": doc.file_size,
-                "status": models.STATUS_PENDING}, client_ip(request))
+    """普通用户上传：→ pending，归属上传者部门（无部门=公开）。
+
+    重复文件且 update_if_duplicate=true 且有权限时走更新为新版本通道（F2/F8 修复）。
+    """
+    doc, is_update = _prepare_upload(
+        db, file, title,
+        department_id=current_user.department_id,
+        source=models.SOURCE_UPLOAD,
+        uploaded_by=current_user.id,
+        update_if_duplicate=update_if_duplicate,
+        current_user=current_user,
+        upload_source_label="user_upload",
+        request=request)
+    if not is_update:
+        log_action(db, current_user, "upload", "document", doc.id,
+                   {"file_name": doc.file_name, "file_size": doc.file_size,
+                    "status": models.STATUS_PENDING}, client_ip(request))
     return schemas.ok(schemas.document_to_dict(doc))
 
 

@@ -38,6 +38,19 @@ class UserUpdate(BaseModel):
     password: Optional[str] = Field(None, min_length=6, max_length=128)
 
 
+class ChangePasswordRequest(BaseModel):
+    """自助修改密码请求。字段手动校验（Any 类型），路由内统一返回 400 业务码。"""
+    old_password: Any = None
+    new_password: Any = None
+
+
+class BatchApproveRequest(BaseModel):
+    """批量审批请求。字段手动校验（Any 类型），路由内统一返回 400 业务码。"""
+    action: Any = None
+    document_ids: Any = None
+    reason: Any = None
+
+
 # ---------------- 分页响应 ----------------
 
 
@@ -64,6 +77,7 @@ def user_to_dict(user) -> dict:
         "role": user.role,
         "department_id": user.department_id,
         "department_name": user.department.name if user.department else None,
+        "must_change_password": bool(user.must_change_password),
         "created_at": user.created_at,
     }
 

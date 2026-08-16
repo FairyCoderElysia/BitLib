@@ -407,48 +407,83 @@ function onFileRemove(_file, fileList) {
   uploadFileList.value = fileList
 }
 
-/** 自定义上传：带进度 POST /admin/documents/upload */
-async function customUpload(options) {
+/** 构造直入库上传表单；updateIfDuplicate=true 时触发更新为新版本通道（F2/F8 修复） */
+function buildUploadForm(file, updateIfDuplicate) {
   const fd = new FormData()
-  fd.append('file', options.file)
+  fd.append('file', file)
   if (uploadForm.value.title.trim()) fd.append('title', uploadForm.value.title.trim())
   if (uploadForm.value.department_id != null) fd.append('department_id', uploadForm.value.department_id)
+  if (updateIfDuplicate) fd.append('update_if_duplicate', 'true')
+  return fd
+}
+
+/** 自定义上传：带进度 POST /admin/documents/upload；重复文件可更新为新版本 */
+async function customUpload(options) {
   uploadProgress.value = 0
-  try {
-    const res = await http.post('/admin/documents/upload', fd, {
+  const postUpload = async (withUpdate) => {
+    const fd = buildUploadForm(options.file, withUpdate)
+    return http.post('/admin/documents/upload', fd, {
       onUploadProgress: (e) => {
         if (e.total) uploadProgress.value = Math.round((e.loaded / e.total) * 100)
       },
     })
+  }
+
+  try {
+    const res = await postUpload(false)
     const doc = res.data?.data
     ElMessage.success(`「${doc?.title || options.file.name}」上传成功`)
     return doc
   } catch (e) {
+    const detail = e?.response?.data?.detail
+    if (detail?.can_update) {
+      try {
+        await ElMessageBox.confirm(
+          `该文件与「${detail.title || detail.document_id}」内容重复。是否更新为新版本？更新将替换原正文、分块与向量，保留原文档记录。`,
+          '重复文件',
+          {
+            type: 'warning',
+            confirmButtonText: '更新为新版本',
+            cancelButtonText: '取消',
+          }
+        )
+      } catch (cancel) {
+        return null // 用户取消，不视为失败
+      }
+      const res = await postUpload(true)
+      const doc = res.data?.data
+      ElMessage.success(`「${doc?.title || options.file.name}」已更新为新版本`)
+      return doc
+    }
     // 失败信息由拦截器弹出，向上抛以停止剩余文件
     throw e
   }
 }
 
-/** 提交文件列表（逐文件上传） */
+/** 提交文件列表（逐文件上传；取消更新不计入成功/失败） */
 async function submitUpload() {
   uploading.value = true
   uploadProgress.value = 0
   let ok = 0
   let failed = 0
+  let cancelled = 0
   const files = uploadFileList.value.slice()
   for (const f of files) {
     try {
-      await customUpload({ file: f.raw })
-      ok += 1
+      const doc = await customUpload({ file: f.raw })
+      if (doc === null) cancelled += 1
+      else ok += 1
     } catch (e) {
       failed += 1
     }
   }
   uploading.value = false
   if (failed) {
-    ElMessage.warning(`上传完成：成功 ${ok} 个，失败 ${failed} 个`)
-  } else {
+    ElMessage.warning(`上传完成：成功 ${ok} 个，失败 ${failed} 个${cancelled ? `，取消 ${cancelled} 个` : ''}`)
+  } else if (ok) {
     ElMessage.success(`全部上传成功（${ok} 个）`)
+  } else if (cancelled) {
+    ElMessage.info('已取消上传')
   }
   uploadVisible.value = false
   uploadFileList.value = []

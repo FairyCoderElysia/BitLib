@@ -77,6 +77,11 @@ async function onSubmit() {
   try {
     await userStore.login(form.username.trim(), form.password)
     ElMessage.success('登录成功')
+    // F1 首登强制改密：优先进入改密流程（守卫也会兜底强制跳转）
+    if (userStore.mustChangePassword) {
+      router.push('/change-password')
+      return
+    }
     // 支持登录后回跳原目标页
     const redirect = route.query.redirect
     router.push(typeof redirect === 'string' ? redirect : '/')

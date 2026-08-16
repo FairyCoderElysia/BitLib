@@ -124,6 +124,7 @@ def _seed_defaults():
             password_hash=hash_password(password),
             role="admin",
             department_id=None,
+            must_change_password=True,  # 仅首次播种的内置 admin 强制首登改密（F1 修复）
         ))
         db.commit()
         logger.info("已播种内置 admin 账号")
@@ -136,6 +137,7 @@ def _migrate_columns() -> None:
     - document.source_url（VARCHAR(512)，可空）：SQLite ALTER 仅允许追加可空/带默认列，满足；
       索引不随 ALTER 创建，需单独 CREATE INDEX IF NOT EXISTS（与 models 声明的 index 同名幂等）。
     - crawl_run_log.updated_count（INTEGER DEFAULT 0）：同上。
+    - user.must_change_password（INTEGER DEFAULT 0，F1 修复）：同上；不建索引（仅登录/me 读取）。
     - 全新库由 create_all 直接建列，PRAGMA 检查命中即跳过；异常降级警告，不阻塞启动。
     """
     try:
@@ -148,6 +150,11 @@ def _migrate_columns() -> None:
             if "updated_count" not in cols2:
                 conn.execute(text("ALTER TABLE crawl_run_log ADD COLUMN updated_count INTEGER DEFAULT 0"))
                 logger.info("迁移：crawl_run_log 增加 updated_count 列")
+            cols3 = [r[1] for r in conn.execute(text("PRAGMA table_info(user)")).fetchall()]
+            if "must_change_password" not in cols3:
+                conn.execute(text(
+                    "ALTER TABLE user ADD COLUMN must_change_password INTEGER DEFAULT 0"))
+                logger.info("迁移：user 增加 must_change_password 列")
         with engine.begin() as conn:
             conn.execute(text(
                 "CREATE INDEX IF NOT EXISTS ix_document_source_url ON document(source_url)"))

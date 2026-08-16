@@ -47,6 +47,61 @@ def ingest_text(db: Session, doc: models.Document, raw_text: str,
     return doc
 
 
+def ingest_document_update(db: Session, doc: models.Document,
+                           new_file_path: str, new_file_size: int,
+                           new_file_hash: str,
+                           regen_summary: bool = True) -> models.Document:
+    """更新为新版本（F2/F8 修复）专用入口。
+
+    先完成解析/清洗/分片/embedding 全部可失败计算，成功后才进入破坏性替换阶段
+    （清理旧 ChunkParent/旧 Chroma child → 写新 Chroma → 写新 ChunkParent →
+    更新 doc 文件字段与 FTS → commit）。任一步可失败计算失败：删除新落盘文件，
+    恢复 doc 为 approved，旧文件/旧分块/旧向量/旧 FTS 全部不动。
+    破坏性替换阶段失败：置 failed 并记录 error_message（可 reprocess 恢复），
+    并删除新落盘文件。
+    """
+    new_path = Path(settings.upload_dir) / new_file_path
+    old_file_path = doc.file_path
+    old_file_size = doc.file_size
+    old_file_hash = doc.file_hash
+
+    # ---- 可失败计算阶段：绝不触碰旧数据 ----
+    try:
+        raw = parse_file(new_path)
+        text, chunks, embeddings = _compute_pipeline(doc, raw)
+    except Exception:
+        db.rollback()
+        # 调用方可能已把 doc 置为 processing；可失败阶段失败要恢复 approved
+        doc.status = models.STATUS_APPROVED
+        doc.error_message = None
+        db.add(doc)
+        db.commit()
+        new_path.unlink(missing_ok=True)
+        raise
+
+    # ---- 破坏性替换阶段 ----
+    try:
+        _replace_document_data(db, doc, text, chunks, embeddings, regen_summary)
+        doc.file_path = new_file_path
+        doc.file_size = new_file_size
+        doc.file_hash = new_file_hash
+        db.add(doc)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        new_path.unlink(missing_ok=True)
+        _mark_failed(db, doc, exc)
+        raise
+
+    # 成功后删除旧物理文件
+    if old_file_path and old_file_path != new_file_path:
+        Path(settings.upload_dir, old_file_path).unlink(missing_ok=True)
+    logger.info("文档 %s 已更新为新版本：%s -> %s（%s -> %s）",
+                doc.id, old_file_hash, new_file_hash,
+                old_file_size, new_file_size)
+    return doc
+
+
 def _mark_failed(db: Session, doc: models.Document, exc: Exception) -> None:
     db.rollback()
     doc.status = models.STATUS_FAILED
@@ -62,37 +117,38 @@ def _mark_failed(db: Session, doc: models.Document, exc: Exception) -> None:
     logger.error("文档 %s 入库失败: %s", doc.id, exc)
 
 
-def _run_pipeline(db: Session, doc: models.Document, raw: str,
-                  regen_summary: bool = True) -> None:
-
-    # 2. 清洗 + 过短拦截
+def _compute_pipeline(doc: models.Document, raw: str):
+    """可失败计算阶段：清洗 → 分片 → 全部 child embedding。不触碰旧数据。"""
     text = clean_text(raw)
     if len(text) < MIN_TEXT_LEN:
         raise ValueError(f"清洗后有效文本过短（{len(text)} 字符 < {MIN_TEXT_LEN}），不入库")
 
-    # 3. 父子分片
     chunks = chunk_document(text)
 
-    # 4. 清理旧分块（仅重新入库场景需要）
-    #    首次入库集合中无该文档，跳过 Chroma delete——空集合上 delete(where=...)
-    #    会触发 Chroma compactor 异步竞态，偶发 "Error loading hnsw index" 致入库失败
-    #    （实测 M1M2 回归偶现）。以 SQLite 侧 ChunkParent 是否存在判断是否重入库。
-    if db.query(models.ChunkParent).filter(
-            models.ChunkParent.document_id == doc.id).first() is not None:
-        vector_store.delete_by_document(doc.id)
-        db.query(models.ChunkParent).filter(
-            models.ChunkParent.document_id == doc.id).delete()
-    else:
-        db.query(models.ChunkParent).filter(
-            models.ChunkParent.document_id == doc.id).delete()  # 兜底清 SQLite 侧
-
-    # 5. 全部 child 向量化
     child_texts = [c["text"] for p in chunks for c in p["children"]]
     embeddings = embed(child_texts) if child_texts else []
     if not embeddings:
         raise ValueError("分片结果为空，无法入库")
+    return text, chunks, embeddings
 
-    # 6. Chroma 写入（metadata 冗余可见性字段）
+
+def _replace_document_data(db: Session, doc: models.Document, text: str,
+                           chunks: list, embeddings: list,
+                           regen_summary: bool = True) -> None:
+    """破坏性替换阶段：清理旧分块/旧向量 → 写新 Chroma → 写新 ChunkParent → 更新 doc/FTS → commit。"""
+    # 清理旧分块（仅重新入库场景需要）
+    # 首次入库集合中无该文档，跳过 Chroma delete——空集合上 delete(where=...)
+    # 会触发 Chroma compactor 异步竞态，偶发 "Error loading hnsw index" 致入库失败
+    # （实测 M1M2 回归偶现）。以 SQLite 侧 ChunkParent 是否存在判断是否重入库。
+    has_old = db.query(models.ChunkParent).filter(
+        models.ChunkParent.document_id == doc.id).first() is not None
+    if has_old:
+        vector_store.delete_by_document(doc.id)
+    db.query(models.ChunkParent).filter(
+        models.ChunkParent.document_id == doc.id).delete(
+        synchronize_session=False)
+
+    # Chroma 写入（metadata 冗余可见性字段）
     dept_val = "" if doc.department_id is None else str(doc.department_id)
     items = []
     idx = 0
@@ -111,7 +167,7 @@ def _run_pipeline(db: Session, doc: models.Document, raw: str,
             idx += 1
     vector_store.add_children(items)
 
-    # 7. ChunkParent 写 SQLite
+    # ChunkParent 写 SQLite
     for p in chunks:
         db.add(models.ChunkParent(
             document_id=doc.id,
@@ -120,7 +176,7 @@ def _run_pipeline(db: Session, doc: models.Document, raw: str,
             text=p["parent"]["text"],
         ))
 
-    # 8. 更新文档 + FTS 同步
+    # 更新文档 + FTS 同步
     doc.content_text = text
     # 摘要生成（F17）：LLM 失败内部已降级截取，绝不抛错、不影响入库状态；
     # 重建场景（regen_summary=False）保留已有 summary，跳过 LLM 调用以提速
@@ -133,3 +189,10 @@ def _run_pipeline(db: Session, doc: models.Document, raw: str,
     fts.sync_document(db, doc)
     db.commit()
     logger.info("文档 %s 入库完成：%d child / %d parent", doc.id, len(items), len(chunks))
+
+
+def _run_pipeline(db: Session, doc: models.Document, raw: str,
+                  regen_summary: bool = True) -> None:
+    """完整入库管线：可失败计算 → 破坏性替换。"""
+    text, chunks, embeddings = _compute_pipeline(doc, raw)
+    _replace_document_data(db, doc, text, chunks, embeddings, regen_summary)

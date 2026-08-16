@@ -11,7 +11,9 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from typing import Any
+
+from fastapi import APIRouter, Body, Depends, File, Form, Request, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -20,9 +22,10 @@ from .. import models, schemas
 from ..audit import client_ip, log_action
 from ..db import get_db
 from ..deps import require_admin, require_dept_admin
-from ..errors import bad_request, conflict, forbidden, not_found
+from ..errors import (CODE_INTERNAL, BizError, bad_request, conflict, forbidden,
+                      not_found)
 from ..ingest import ingest_document
-from ..routers.documents import _build_document, delete_stored_file
+from ..routers.documents import _prepare_upload, delete_stored_file
 from ..security import hash_password
 
 logger = logging.getLogger(__name__)
@@ -70,24 +73,48 @@ def pending_documents(page: int = 1, page_size: int = 20,
     })
 
 
-@router.post("/pending/{document_id}/approve")
-def approve_document(document_id: int,
-                     request: Request,
-                     db: Session = Depends(get_db),
-                     current_user: models.User = Depends(require_dept_admin)):
-    """审批通过：pending → processing → ingest_document（占位）→ approved。"""
+def _approve_one(db: Session, document_id: int, current_user: models.User,
+                request: Request, batch: bool = False) -> dict:
+    """单条审批通过：pending → processing → ingest_document → approved。"""
     doc = _assert_approvable(db, document_id, current_user)
     doc.status = models.STATUS_PROCESSING
     doc.approver_id = current_user.id
     doc.approved_at = datetime.utcnow()
     db.add(doc)
     db.commit()
-    # 触发解析入库管线（本轮为占位：置 approved + 打印提示）
     ingest_document(db, doc)
     log_action(db, current_user, "approve", "document", doc.id,
-               {"file_name": doc.file_name, "status": models.STATUS_APPROVED},
+               {"file_name": doc.file_name, "status": doc.status,
+                "batch": batch},
                client_ip(request))
-    return schemas.ok({"id": doc.id, "status": doc.status})
+    return {"id": doc.id, "status": doc.status}
+
+
+def _reject_one(db: Session, document_id: int, reason: str,
+                current_user: models.User, request: Request,
+                batch: bool = False) -> dict:
+    """单条审批拒绝：pending → rejected，附拒绝原因。"""
+    doc = _assert_approvable(db, document_id, current_user)
+    doc.status = models.STATUS_REJECTED
+    doc.reject_reason = reason.strip()
+    doc.approver_id = current_user.id
+    db.add(doc)
+    db.commit()
+    log_action(db, current_user, "reject", "document", doc.id,
+               {"file_name": doc.file_name, "reason": doc.reject_reason,
+                "batch": batch},
+               client_ip(request))
+    return {"id": doc.id, "status": doc.status}
+
+
+@router.post("/pending/{document_id}/approve")
+def approve_document(document_id: int,
+                     request: Request,
+                     db: Session = Depends(get_db),
+                     current_user: models.User = Depends(require_dept_admin)):
+    """审批通过：pending → processing → ingest_document → approved。"""
+    result = _approve_one(db, document_id, current_user, request)
+    return schemas.ok(result)
 
 
 @router.post("/pending/{document_id}/reject")
@@ -97,16 +124,72 @@ def reject_document(document_id: int,
                     db: Session = Depends(get_db),
                     current_user: models.User = Depends(require_dept_admin)):
     """审批拒绝：pending → rejected，附拒绝原因（上传者可见）。"""
-    doc = _assert_approvable(db, document_id, current_user)
-    doc.status = models.STATUS_REJECTED
-    doc.reject_reason = body.reason.strip()
-    doc.approver_id = current_user.id
-    db.add(doc)
-    db.commit()
-    log_action(db, current_user, "reject", "document", doc.id,
-               {"file_name": doc.file_name, "reason": doc.reject_reason},
-               client_ip(request))
-    return schemas.ok({"id": doc.id, "status": doc.status})
+    result = _reject_one(db, document_id, body.reason, current_user, request)
+    return schemas.ok(result)
+
+
+@router.post("/pending/batch")
+def batch_approve_documents(body: Any = Body(None),
+                            request: Request = None,
+                            db: Session = Depends(get_db),
+                            current_user: models.User = Depends(require_dept_admin)):
+    """批量审批（F15 修复）：逐条独立事务、逐条审计、部分失败返回 200 + results 明细。
+
+    手动校验（统一 400 业务码，避免 FastAPI 默认 422）：
+    - action 必须为 approve / reject
+    - document_ids 必须为非空整数数组，单次上限 100，去重保序后处理
+    - reject 时 reason 必须为非空字符串且长度 ≤ 500（approve 时忽略 reason）
+    """
+    if not isinstance(body, dict):
+        raise bad_request("请求体必须为 JSON 对象")
+    action = body.get("action")
+    document_ids = body.get("document_ids")
+    reason = body.get("reason")
+
+    if action not in ("approve", "reject"):
+        raise bad_request("action 必须为 approve 或 reject")
+    if not isinstance(document_ids, list):
+        raise bad_request("document_ids 必须为数组")
+    if any(type(x) is not int for x in document_ids):
+        raise bad_request("document_ids 必须为整数数组")
+    if not document_ids:
+        raise bad_request("document_ids 不能为空")
+    if len(document_ids) > 100:
+        raise bad_request("单次最多处理 100 个文档")
+    if action == "reject":
+        if not isinstance(reason, str) or not reason.strip():
+            raise bad_request("批量拒绝必须填写原因")
+        if len(reason.strip()) > 500:
+            raise bad_request("拒绝原因长度不能超过 500")
+
+    ids = list(dict.fromkeys(document_ids))  # 去重保序
+    results = []
+    succeeded = 0
+    for doc_id in ids:
+        try:
+            if action == "approve":
+                result = _approve_one(db, doc_id, current_user, request, batch=True)
+            else:
+                result = _reject_one(db, doc_id, reason, current_user, request,
+                                     batch=True)
+            results.append({"id": doc_id, "success": True,
+                            "status": result["status"]})
+            succeeded += 1
+        except BizError as exc:
+            db.rollback()
+            results.append({"id": doc_id, "success": False,
+                            "code": exc.code, "message": exc.message})
+        except Exception as exc:  # 防御：单条异常不中断批量，失败明细兜底
+            db.rollback()
+            logger.exception("批量审批单条异常 document_id=%s: %s", doc_id, exc)
+            results.append({"id": doc_id, "success": False,
+                            "code": CODE_INTERNAL, "message": "处理失败"})
+    return schemas.ok({
+        "total": len(ids),
+        "succeeded": succeeded,
+        "failed": len(ids) - succeeded,
+        "results": results,
+    })
 
 
 # ---------------- 管理端直入库上传 ----------------
@@ -118,13 +201,15 @@ def direct_upload(
     file: UploadFile = File(...),
     title: str = Form(""),
     department_id: Optional[int] = Form(None),
+    update_if_duplicate: bool = Form(False),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_dept_admin),
 ):
-    """管理端直入库上传（跳过审批，直接走解析入库管线，本轮占位）。
+    """管理端直入库上传（跳过审批，直接走解析入库管线）。
 
     - admin：可指定任意部门或公开（department_id 空）
     - dept_admin：仅本部门或公开
+    - update_if_duplicate=true 且重复文件有权限时走更新为新版本通道（F2/F8 修复）
     """
     if current_user.role == models.ROLE_DEPT_ADMIN and \
             department_id is not None and department_id != current_user.department_id:
@@ -132,19 +217,23 @@ def direct_upload(
     if department_id is not None and db.get(models.Department, department_id) is None:
         raise bad_request("部门不存在")
 
-    doc = _build_document(db, file, title, department_id=department_id,
-                          source=models.SOURCE_UPLOAD,
-                          uploaded_by=current_user.id)
-    doc.status = models.STATUS_PROCESSING  # 直入库先置 processing，随后占位入库
-    db.add(doc)
-    db.commit()
-    ingest_document(db, doc)
-    log_action(db, current_user, "direct_upload", "document", doc.id,
-               {"file_name": doc.file_name, "status": models.STATUS_APPROVED,
-                "department_id": department_id}, client_ip(request))
+    doc, is_update = _prepare_upload(
+        db, file, title, department_id=department_id,
+        source=models.SOURCE_UPLOAD,
+        uploaded_by=current_user.id,
+        update_if_duplicate=update_if_duplicate,
+        current_user=current_user,
+        upload_source_label="admin_upload",
+        request=request)
+    if not is_update:
+        doc.status = models.STATUS_PROCESSING  # 直入库先置 processing，随后入库
+        db.add(doc)
+        db.commit()
+        ingest_document(db, doc)
+        log_action(db, current_user, "direct_upload", "document", doc.id,
+                   {"file_name": doc.file_name, "status": doc.status,
+                    "department_id": department_id}, client_ip(request))
     return schemas.ok(schemas.document_to_dict(doc))
-
-
 @router.post("/documents/{document_id}/reprocess")
 def reprocess_document(document_id: int,
                        request: Request,

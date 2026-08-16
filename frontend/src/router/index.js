@@ -11,6 +11,11 @@ const routes = [
     meta: { public: true },
   },
   {
+    path: '/change-password',
+    name: 'change-password',
+    component: () => import('@/views/ChangePassword.vue'),
+  },
+  {
     path: '/',
     component: UserLayout,
     redirect: '/search',
@@ -72,6 +77,11 @@ router.beforeEach(async (to) => {
     } catch (e) {
       /* 拦截器已提示并处理 */
     }
+  }
+
+  // F1 首登强制改密：完成改密前除 /change-password、/login 外一律跳转改密页
+  if (userStore.user?.must_change_password && to.path !== '/change-password') {
+    return { path: '/change-password' }
   }
 
   if (to.path.startsWith('/admin')) {

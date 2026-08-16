@@ -149,7 +149,7 @@
 <script setup>
 import { ref, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Upload, UploadFilled } from '@element-plus/icons-vue'
 import { searchApi, docApi } from '@/api/modules'
 import { FILE_TYPE_LABEL, FILE_TYPE_TAG, SOURCE_LABEL, formatSize, formatTime } from '@/utils/format'
@@ -303,21 +303,62 @@ function onFileRemove() {
   selectedFile.value = null
 }
 
-/** 普通用户上传：POST /documents/upload → pending 待审批 */
-async function submitUpload() {
-  if (!selectedFile.value) return
-  uploading.value = true
+function buildUploadForm(updateIfDuplicate) {
   const fd = new FormData()
   fd.append('file', selectedFile.value.raw)
   if (uploadTitle.value.trim()) fd.append('title', uploadTitle.value.trim())
+  if (updateIfDuplicate) fd.append('update_if_duplicate', 'true')
+  return fd
+}
+
+/** 上传一次；返回 'created' | 'updated' | 'cancelled' */
+async function uploadOnce(updateIfDuplicate) {
+  await docApi.upload(buildUploadForm(updateIfDuplicate))
+  return updateIfDuplicate ? 'updated' : 'created'
+}
+
+/** 普通用户上传：POST /documents/upload → pending 待审批；重复且可更新时提示更新为新版本 */
+async function submitUpload() {
+  if (!selectedFile.value) return
+  uploading.value = true
   try {
-    await docApi.upload(fd)
-    ElMessage.success('上传成功，已提交审批')
+    let result
+    try {
+      result = await uploadOnce(false)
+    } catch (e) {
+      const detail = e?.response?.data?.detail
+      if (detail?.can_update) {
+        try {
+          await ElMessageBox.confirm(
+            `该文件与「${detail.title || detail.document_id}」内容重复。是否更新为新版本？更新将替换原正文、分块与向量，保留原文档记录。`,
+            '重复文件',
+            {
+              type: 'warning',
+              confirmButtonText: '更新为新版本',
+              cancelButtonText: '取消',
+            }
+          )
+        } catch (cancel) {
+          result = 'cancelled'
+          throw new Error('cancelled')
+        }
+        result = await uploadOnce(true)
+      } else {
+        throw e
+      }
+    }
+    if (result === 'updated') {
+      ElMessage.success('已更新为新版本')
+    } else if (result === 'created') {
+      ElMessage.success('上传成功，已提交审批')
+    }
     uploadVisible.value = false
     selectedFile.value = null
     uploadTitle.value = ''
   } catch (e) {
-    /* 拦截器已提示 */
+    if (e?.message !== 'cancelled') {
+      /* 错误提示由拦截器统一弹出 */
+    }
   } finally {
     uploading.value = false
   }

@@ -26,6 +26,8 @@ export const useUserStore = defineStore('user', {
     role: (s) => s.user?.role || '',
     /** 管理端（admin 或部门管理员） */
     isAdmin: (s) => s.user?.role === 'admin' || s.user?.role === 'dept_admin',
+    /** 首登强制改密标志（F1 修复） */
+    mustChangePassword: (s) => !!s.user?.must_change_password,
     displayName: (s) => s.user?.username || '未登录',
   },
   actions: {
@@ -42,6 +44,13 @@ export const useUserStore = defineStore('user', {
     async fetchMe() {
       if (!this.token) return null
       const user = await authApi.me()
+      this.user = user
+      localStorage.setItem(USER_KEY, JSON.stringify(user))
+      return user
+    },
+    /** 自助修改密码（F1 修复）：成功后更新本地用户信息与强制改密标志 */
+    async changePassword(oldPassword, newPassword) {
+      const user = await authApi.changePassword(oldPassword, newPassword)
       this.user = user
       localStorage.setItem(USER_KEY, JSON.stringify(user))
       return user
