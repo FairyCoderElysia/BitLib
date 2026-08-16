@@ -98,7 +98,11 @@ def _snippet(text: str, query: str, width: int = 120) -> str:
 def hybrid_search(db: Session, user: models.User, query: str,
                   top_k: int = RECALL_TOP_K, limit: int = 5,
                   scorer=None) -> list[dict]:
-    """混合检索主流程。返回 [{document, snippet, score, matched}] 按相关度排序。"""
+    """混合检索主流程。返回 [{document, snippet, score, matched, parent_ids}] 按相关度排序。
+
+    parent_ids 为该文档在语义路命中的 parent chunk_index 去重列表（按语义命中顺序），
+    供 QA 上下文装配做 small-to-big 回溯；不影响排序/RRF/重排/阈值。
+    """
     if not query.strip():
         return []
 
@@ -116,9 +120,16 @@ def hybrid_search(db: Session, user: models.User, query: str,
     fused = rrf_fuse([kw_ids, sem_ids])
 
     # 组装候选（重排文本用 content_text 前段；parent 回溯信息来自语义命中）
+    # S5：保留原有 parent_id（首个语义命中）不动，同时按语义命中顺序收集去重的
+    # parent_ids 列表，供 QA 上下文装配做 small-to-big 回溯；排序/RRF/重排/阈值均不改。
     parent_by_doc: dict[int, int] = {}
+    parent_ids_by_doc: dict[int, list[int]] = {}
     for h in sem_hits:
         parent_by_doc.setdefault(h["document_id"], h["parent_id"])
+        lst = parent_ids_by_doc.setdefault(h["document_id"], [])
+        pid = h.get("parent_id")
+        if pid not in lst:
+            lst.append(pid)
 
     candidates = []
     for doc_id, rrf in fused[: max(limit * 4, 20)]:
@@ -163,6 +174,7 @@ def hybrid_search(db: Session, user: models.User, query: str,
             "score": c["score"],
             "snippet": _snippet(c["text"], query),
             "matched": None,
+            "parent_ids": parent_ids_by_doc.get(c["doc"].id, []),
         })
     return results
 
