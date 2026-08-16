@@ -55,6 +55,7 @@ from app.main import app  # noqa: E402
 from app.summary import _fallback_cut, generate_summary, get_display_summary  # noqa: E402
 
 ADMIN_PASSWORD = "Admin@123456"
+NEW_ADMIN_PASSWORD = "Admin@123456!"  # A7 硬拦截适配：首登 admin 改密用
 EMBED_DIM = 512  # 与 settings.embedding_dim 一致，mock 向量维度
 
 
@@ -91,7 +92,13 @@ def main():
     def login(c, username, password):
         r = c.post("/api/auth/login", json={"username": username, "password": password})
         assert r.status_code == 200 and r.json()["code"] == 0, r.text
-        return r.json()["data"]["token"]
+        data = r.json()["data"]
+        # A7 硬拦截适配：首登 admin 未改密前业务 API 均 403；先改密再继续。
+        if data["user"].get("must_change_password"):
+            rr = c.post("/api/auth/change-password", headers=H(data["token"]),
+                        json={"old_password": password, "new_password": NEW_ADMIN_PASSWORD})
+            assert rr.status_code == 200 and rr.json()["code"] == 0, rr.text
+        return data["token"]
 
     def fts_row(db, doc_id):
         """查 document_fts 行（rowid = document.id）。"""

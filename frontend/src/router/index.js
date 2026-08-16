@@ -79,9 +79,18 @@ router.beforeEach(async (to) => {
     }
   }
 
-  // F1 首登强制改密：完成改密前除 /change-password、/login 外一律跳转改密页
+  // F1 首登强制改密：完成改密前除 /change-password、/login 外一律跳转改密页。
+  // D3：本地快照为 true 时，在关键导航上重新向 /auth/me 确认，避免 A 标签页
+  // 已改密、B 标签页仍被旧快照强制跳转 /change-password。
   if (userStore.user?.must_change_password && to.path !== '/change-password') {
-    return { path: '/change-password' }
+    try {
+      await userStore.fetchMe()
+    } catch (e) {
+      /* /auth/me 失败时保持旧快照兜底（宁可多改一次，也不放行业务） */
+    }
+    if (userStore.user?.must_change_password && to.path !== '/change-password') {
+      return { path: '/change-password' }
+    }
   }
 
   if (to.path.startsWith('/admin')) {

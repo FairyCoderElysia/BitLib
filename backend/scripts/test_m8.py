@@ -44,6 +44,7 @@ from app.main import app  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 ADMIN_PASSWORD = "Admin@123456"
+NEW_ADMIN_PASSWORD = "Admin@123456!"  # A7 硬拦截适配：首登 admin 改密用
 
 # ---------------- 页面内容（v1 含"区块链/共识"，v2 改为"量子计算/超导"） ----------------
 
@@ -144,7 +145,13 @@ def main():
     def login(c, username, password):
         r = c.post("/api/auth/login", json={"username": username, "password": password})
         assert r.status_code == 200 and r.json()["code"] == 0, r.text
-        return r.json()["data"]["token"]
+        data = r.json()["data"]
+        # A7 硬拦截适配：首登 admin 未改密前业务 API 均 403；先改密再继续。
+        if data["user"].get("must_change_password"):
+            rr = c.post("/api/auth/change-password", headers=H(data["token"]),
+                        json={"old_password": password, "new_password": NEW_ADMIN_PASSWORD})
+            assert rr.status_code == 200 and rr.json()["code"] == 0, rr.text
+        return data["token"]
 
     def cols_of(table):
         with engine.connect() as conn:

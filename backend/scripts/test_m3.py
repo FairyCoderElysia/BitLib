@@ -32,6 +32,7 @@ from app.db import SessionLocal  # noqa: E402
 from app.main import app  # noqa: E402
 
 ADMIN_PASSWORD = "Admin@123456"
+NEW_ADMIN_PASSWORD = "Admin@123456!"  # A7 硬拦截适配：首登 admin 改密用
 
 
 def H(token):
@@ -88,7 +89,13 @@ def main():
         with TestClient(app) as c:
             r = c.post("/api/auth/login", json={"username": "admin", "password": ADMIN_PASSWORD})
             assert r.status_code == 200 and r.json()["code"] == 0, r.text
-            token = r.json()["data"]["token"]
+            data = r.json()["data"]
+            token = data["token"]
+            if data["user"].get("must_change_password"):
+                r = c.post("/api/auth/change-password", headers=H(token),
+                           json={"old_password": ADMIN_PASSWORD,
+                                 "new_password": NEW_ADMIN_PASSWORD})
+                assert r.status_code == 200 and r.json()["code"] == 0, r.text
 
             # ---------- 1. 四种格式样例入库 ----------
             samples = []

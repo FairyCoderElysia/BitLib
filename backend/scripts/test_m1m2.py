@@ -32,6 +32,7 @@ from app.main import app  # noqa: E402
 from app.db import engine  # noqa: E402
 
 ADMIN_PASSWORD = "Admin@123456"
+NEW_ADMIN_PASSWORD = "Admin@123456!"  # A7 硬拦截适配：首登 admin 改密用
 
 
 def H(token):
@@ -58,6 +59,15 @@ def main():
             assert data["user"]["username"] == "admin"
             assert data["user"]["role"] == "admin"
             check("1. 登录成功返回 token + 用户信息(角色/用户名)")
+
+            # A7 后端硬拦截适配：首登 admin 未改密前业务 API 均 403，
+            # 先完成改密再继续后续审批/直入库/建号流程。
+            if data["user"].get("must_change_password"):
+                r = c.post("/api/auth/change-password", headers=H(admin_token),
+                           json={"old_password": ADMIN_PASSWORD,
+                                 "new_password": NEW_ADMIN_PASSWORD})
+                assert r.status_code == 200 and r.json()["code"] == 0, r.text
+                check("1. 首登 admin 改密成功（A7 测试适配）")
 
             r = c.post("/api/auth/login",
                        json={"username": "admin", "password": "wrong-password"})

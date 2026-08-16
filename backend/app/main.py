@@ -4,6 +4,8 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -144,6 +146,20 @@ async def _http_exception_handler(request: Request, exc: HTTPException):
     code = _HTTP_TO_CODE.get(exc.status_code, CODE_INTERNAL)
     return JSONResponse(status_code=exc.status_code, content={
         "code": code, "message": str(exc.detail), "detail": {}})
+
+
+@app.exception_handler(RequestValidationError)
+async def _request_validation_error_handler(request: Request, exc: RequestValidationError):
+    """D2：malformed JSON 等 FastAPI 默认 422 统一为 400 + 业务码结构。
+
+    仅处理 FastAPI 请求校验错误（JSON 解析失败 / 路径与查询参数校验失败等），
+    不影响 BizError 与 HTTPException 的既有业务错误响应。
+    """
+    return JSONResponse(status_code=400, content={
+        "code": CODE_BAD_REQUEST,
+        "message": "请求参数校验失败",
+        "detail": {"errors": jsonable_encoder(exc.errors())},
+    })
 
 
 @app.exception_handler(Exception)

@@ -154,13 +154,17 @@ def _prepare_upload(db: Session, upload: UploadFile, title: str,
                 "hint": "如具备更新权限，可带 update_if_duplicate=true 更新为新版本",
             })
         # 注意：更新通道保留新落盘文件；成功时 ingest_document_update 会把 doc.file_path
-        # 切到新文件并删除旧文件，失败时由它清理新文件；权限/状态校验失败（403/400）此处兜底删除新文件
+        # 切到新文件并删除旧文件，失败时由它清理新文件；权限/状态校验失败（403/400）此处兜底删除新文件。
+        # D1：只应在“文档记录尚未切换到新文件”的失败路径清理新文件；一旦
+        # ingest_document_update 已成功提交（dup.file_path == store_name），
+        # 后续审计失败/旧文件删除失败等不得删除已生效的新文件。
         try:
             doc = document_update.update_document_from_upload(
                 db, current_user, dup, store_name, size, sha256_hex,
                 source_label=upload_source_label, request=request)
         except Exception:
-            Path(settings.upload_dir, store_name).unlink(missing_ok=True)
+            if dup.file_path != store_name:
+                Path(settings.upload_dir, store_name).unlink(missing_ok=True)
             raise
         return doc, True
 

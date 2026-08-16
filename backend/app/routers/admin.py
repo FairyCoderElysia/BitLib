@@ -75,7 +75,11 @@ def pending_documents(page: int = 1, page_size: int = 20,
 
 def _approve_one(db: Session, document_id: int, current_user: models.User,
                 request: Request, batch: bool = False) -> dict:
-    """单条审批通过：pending → processing → ingest_document → approved。"""
+    """单条审批通过：pending → processing → ingest_document → approved/failed。
+
+    返回 dict 含 id / status / error_message。ingest 内部失败时 doc.status=failed
+    且 error_message 已由 _mark_failed 写入；审计仍按“审批动作成功”写 approve。
+    """
     doc = _assert_approvable(db, document_id, current_user)
     doc.status = models.STATUS_PROCESSING
     doc.approver_id = current_user.id
@@ -87,7 +91,7 @@ def _approve_one(db: Session, document_id: int, current_user: models.User,
                {"file_name": doc.file_name, "status": doc.status,
                 "batch": batch},
                client_ip(request))
-    return {"id": doc.id, "status": doc.status}
+    return {"id": doc.id, "status": doc.status, "error_message": doc.error_message}
 
 
 def _reject_one(db: Session, document_id: int, reason: str,
@@ -114,7 +118,8 @@ def approve_document(document_id: int,
                      current_user: models.User = Depends(require_dept_admin)):
     """审批通过：pending → processing → ingest_document → approved。"""
     result = _approve_one(db, document_id, current_user, request)
-    return schemas.ok(result)
+    # 单条接口响应保持既有契约：仅 id / status
+    return schemas.ok({"id": result["id"], "status": result["status"]})
 
 
 @router.post("/pending/{document_id}/reject")
@@ -169,12 +174,23 @@ def batch_approve_documents(body: Any = Body(None),
         try:
             if action == "approve":
                 result = _approve_one(db, doc_id, current_user, request, batch=True)
+                # C1/D4：审批动作成功但 ingest 失败（文档 failed）时，
+                # 条目标记 success:false, status:"failed", message=error_message，
+                # 计入 failed 而非 succeeded；审计仍已写 approve（detail.batch=true）。
+                if result["status"] == models.STATUS_APPROVED:
+                    results.append({"id": doc_id, "success": True,
+                                    "status": result["status"]})
+                    succeeded += 1
+                else:
+                    results.append({"id": doc_id, "success": False,
+                                    "status": result["status"],
+                                    "message": result.get("error_message") or "入库失败"})
             else:
                 result = _reject_one(db, doc_id, reason, current_user, request,
                                      batch=True)
-            results.append({"id": doc_id, "success": True,
-                            "status": result["status"]})
-            succeeded += 1
+                results.append({"id": doc_id, "success": True,
+                                "status": result["status"]})
+                succeeded += 1
         except BizError as exc:
             db.rollback()
             results.append({"id": doc_id, "success": False,

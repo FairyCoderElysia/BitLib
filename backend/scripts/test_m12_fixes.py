@@ -113,6 +113,15 @@ def main():
             assert r.json()["data"]["must_change_password"] is True, r.text
             check("A1b. /auth/me 返回 must_change_password=true")
 
+            # A7 后端硬拦截：未改密用户访问白名单外业务 API 一律 403 + code=40300
+            r = c.get("/api/documents/mine", headers=H(admin_token))
+            assert r.status_code == 403, r.text
+            assert r.json()["code"] == 40300, r.text
+            r = c.get("/api/admin/pending", headers=H(admin_token))
+            assert r.status_code == 403, r.text
+            assert r.json()["code"] == 40300, r.text
+            check("A7a. 未改密首登 admin 调用业务 API 返回 403 + code=40300")
+
             r = c.post("/api/auth/change-password", headers=H(admin_token),
                        json={"old_password": "wrong-old", "new_password": "abc123"})
             assert r.status_code == 400, r.text
@@ -146,6 +155,21 @@ def main():
             r = c.get("/api/auth/me", headers=H(admin_token))
             assert r.json()["data"]["must_change_password"] is False, r.text
             check("A3. 新密码登录成功且不再强制改密；旧密码登录失败")
+
+            # A7b：改密成功后同一 token 可正常访问业务 API
+            r = c.get("/api/documents/mine", headers=H(admin_token))
+            assert r.status_code == 200 and r.json()["code"] == 0, r.text
+            r = c.get("/api/admin/pending", headers=H(admin_token))
+            assert r.status_code == 200 and r.json()["code"] == 0, r.text
+            check("A7b. 改密成功后同一 token 可正常访问业务 API")
+
+            # D2：malformed JSON 统一返回 400 + code=40000（不出现 FastAPI 默认 422）
+            r = c.post("/api/admin/pending/batch",
+                       headers={**H(admin_token), "Content-Type": "application/json"},
+                       content="{bad")
+            assert r.status_code == 400, r.text
+            assert r.json()["code"] == 40000, r.text
+            check("D2. malformed JSON 统一返回 400 + code=40000")
 
             # ================= B. F2/F8 重复文件更新 =================
             r = c.get("/api/auth/departments", headers=H(admin_token))
@@ -327,12 +351,37 @@ def main():
                 assert db.get(models.Document, prod_pending).status == "pending"
             check("C4. 部门管理员批量处理非本部门条目失败且不被处理")
 
+            # C1 边界（D4）：审批动作已执行但 ingest 失败 → success:false,
+            # status:failed, message=error_message，计入 failed 而非 succeeded。
+            r = upload(c, u1, "批量入库失败测试文档内容。" * 12, "bad-ingest.txt")
+            assert r.status_code == 200, r.text
+            bad_ingest_id = r.json()["data"]["id"]
+            with mock.patch("app.ingest.parse_file",
+                            side_effect=ValueError("解析失败：不是合法文本文件")):
+                r = c.post("/api/admin/pending/batch", headers=H(admin_token),
+                           json={"action": "approve", "document_ids": [bad_ingest_id]})
+            assert r.status_code == 200 and r.json()["code"] == 0, r.text
+            data = r.json()["data"]
+            assert data["total"] == 1, r.text
+            assert data["succeeded"] == 0, r.text
+            assert data["failed"] == 1, r.text
+            item = data["results"][0]
+            assert item["success"] is False, r.text
+            assert item["status"] == "failed", r.text
+            assert "解析失败" in (item.get("message") or ""), r.text
+            with SessionLocal() as db:
+                assert db.get(models.Document, bad_ingest_id).status == "failed"
+            check("C1/D4. 批量通过 ingest 失败条目标记 success:false/status:failed 并计入 failed")
+
             r = c.get("/api/admin/audit-logs?action=approve", headers=H(admin_token))
             assert r.status_code == 200, r.text
             batch_approves = [a for a in r.json()["data"]["items"]
                               if a["detail"] and a["detail"].get("batch") is True]
             assert batch_approves, "批量通过应写 batch=true 审计"
-            check("C1b. 批量通过逐条写审计且 detail.batch=true")
+            # ingest 失败条目也应写 approve 审计（审批动作成功），detail.batch=true
+            assert any(a["target_id"] == bad_ingest_id for a in batch_approves), \
+                "ingest 失败条目也应有 approve 审计"
+            check("C1b. 批量通过逐条写审计且 detail.batch=true（含 ingest 失败条目）")
 
     print(f"\n=== ALL {len(passed)} S1 FIX TESTS PASSED ===")
     try:

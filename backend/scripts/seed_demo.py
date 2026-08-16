@@ -13,6 +13,29 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.main import app  # noqa: E402
 
 PW = "admin123"
+NEW_PW = "admin123456"  # A7 硬拦截适配：首登 admin 登录后先改密为该密码
+
+
+def _login_admin(c):
+    """登录内置 admin；若首登强制改密（must_change_password=true），先改密为 NEW_PW。
+
+    返回 (token, changed)。若 admin123 已不可用（上一轮已改密），自动用 NEW_PW 重试。
+    """
+    r = c.post("/api/auth/login", json={"username": "admin", "password": PW})
+    if r.status_code == 401:
+        r = c.post("/api/auth/login", json={"username": "admin", "password": NEW_PW})
+        assert r.status_code == 200, f"admin 登录失败: {r.text}（请检查 .env 的 ADMIN_INITIAL_PASSWORD）"
+        return r.json()["data"]["token"], False
+    assert r.status_code == 200, f"admin 登录失败: {r.text}（请先配置 .env 的 ADMIN_INITIAL_PASSWORD）"
+    data = r.json()["data"]
+    token = data["token"]
+    if data["user"].get("must_change_password"):
+        rr = c.post("/api/auth/change-password",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"old_password": PW, "new_password": NEW_PW})
+        assert rr.status_code == 200 and rr.json()["code"] == 0, rr.text
+        return token, True
+    return token, False
 
 
 def _upload(c, token, name: str, content: str, title: str, department_id=None):
@@ -29,9 +52,11 @@ def _upload(c, token, name: str, content: str, title: str, department_id=None):
 
 def main():
     with TestClient(app) as c:
-        r = c.post("/api/auth/login", json={"username": "admin", "password": PW})
-        assert r.status_code == 200, f"admin 登录失败: {r.text}（请先配置 .env 的 ADMIN_INITIAL_PASSWORD）"
-        token = r.json()["data"]["token"]
+        token, admin_changed = _login_admin(c)
+        if admin_changed:
+            print(f"提示：admin 为首次登录，已自动改密为 {NEW_PW}（后续请使用新密码登录）")
+        else:
+            print(f"提示：admin 密码为 {NEW_PW}（或沿用已配置/已改密的密码）")
 
         depts = {d["name"]: d["id"] for d in c.get(
             "/api/auth/departments",

@@ -79,12 +79,16 @@ def update_document_from_upload(db: Session, user: models.User, doc: models.Docu
         db.rollback()
         raise bad_request(str(exc)[:500])
 
-    log_action(db, user, "update", "document", doc.id,
-               {"source": source_label,
-                "file_name": old_file_name,
-                "old_file_hash": old_file_hash,
-                "new_file_hash": new_file_hash,
-                "old_file_size": old_file_size,
-                "new_file_size": new_file_size},
-               client_ip(request))
+    # D1：审计失败不得让已成功提交的更新表现为 500/半更新，只记录日志。
+    try:
+        log_action(db, user, "update", "document", doc.id,
+                   {"source": source_label,
+                    "file_name": old_file_name,
+                    "old_file_hash": old_file_hash,
+                    "new_file_hash": new_file_hash,
+                    "old_file_size": old_file_size,
+                    "new_file_size": new_file_size},
+                   client_ip(request))
+    except Exception:
+        logger.exception("更新审计写入失败（doc_id=%s），更新本身已提交", doc.id)
     return doc

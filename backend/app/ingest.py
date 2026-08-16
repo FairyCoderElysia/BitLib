@@ -93,9 +93,14 @@ def ingest_document_update(db: Session, doc: models.Document,
         _mark_failed(db, doc, exc)
         raise
 
-    # 成功后删除旧物理文件
+    # 成功后删除旧物理文件。D1：删除失败不得让已提交的更新表现为失败/半更新，
+    # 只记录日志（旧文件残留可后续清理，不影响新文件与文档记录）。
     if old_file_path and old_file_path != new_file_path:
-        Path(settings.upload_dir, old_file_path).unlink(missing_ok=True)
+        try:
+            Path(settings.upload_dir, old_file_path).unlink(missing_ok=True)
+        except Exception:
+            logger.exception("旧文件删除失败（doc_id=%s, old_file=%s），更新本身已提交",
+                             doc.id, old_file_path)
     logger.info("文档 %s 已更新为新版本：%s -> %s（%s -> %s）",
                 doc.id, old_file_hash, new_file_hash,
                 old_file_size, new_file_size)
