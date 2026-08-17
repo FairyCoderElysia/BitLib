@@ -150,6 +150,95 @@ test('L1 资料主流程：普通用户上传 → 管理员审批 → 检索可�
   }
 });
 
+test('L1 多部门可见：普通用户多部门上传 → 审批 → 两部门可检索、第三部门不可见', { tag: ['L1', 'affects:departments,approval,search'] }, async ({ request, page }) => {
+  const unique = Date.now();
+  const userPassword = 'User@123456';
+  const title = `E2E多部门文档_${unique}`;
+  const uniquePhrase = `多部门回归验证串${unique}`;
+  const content = `${uniquePhrase}。本文档用于验证 S7 文档多部门可见：普通用户上传时勾选两个可见部门，审批通过后两个部门成员均可检索，第三部门成员不可检索。`;
+
+  // ---------- API 准备：管理员登录 → 查部门 → 建用户 ----------
+  const adminLogin = await request.post(`${API}/auth/login`, {
+    data: { username: 'admin', password: adminPassword },
+  });
+  expect(adminLogin.status()).toBe(200);
+  const adminToken = (await adminLogin.json()).data.token;
+  const adminHeaders = { Authorization: `Bearer ${adminToken}` };
+
+  const deptRes = await request.get(`${API}/auth/departments`, { headers: adminHeaders });
+  expect(deptRes.status()).toBe(200);
+  const depts = (await deptRes.json()).data;
+  expect(depts.length).toBeGreaterThanOrEqual(3);
+  const [deptA, deptB, deptZ] = depts.map((d) => d.id);
+
+  const usernameA = `e2e_multi_a_${unique}`;
+  const usernameB = `e2e_multi_b_${unique}`;
+  const usernameZ = `e2e_multi_z_${unique}`;
+  for (const [name, dept] of [[usernameA, deptA], [usernameB, deptB], [usernameZ, deptZ]]) {
+    const r = await request.post(`${API}/admin/users`, {
+      headers: adminHeaders,
+      data: { username: name, password: userPassword, role: 'user', department_id: dept },
+    });
+    expect(r.status()).toBe(200);
+  }
+
+  const loginHeaders = async (name) => {
+    const r = await request.post(`${API}/auth/login`, { data: { username: name, password: userPassword } });
+    expect(r.status()).toBe(200);
+    return { Authorization: `Bearer ${(await r.json()).data.token}` };
+  };
+  const [headersA, headersB, headersZ] = await Promise.all([
+    loginHeaders(usernameA), loginHeaders(usernameB), loginHeaders(usernameZ),
+  ]);
+
+  // ---------- API：普通用户多部门上传（department_ids 为 JSON 数组字符串） ----------
+  const uploadRes = await request.post(`${API}/documents/upload`, {
+    headers: headersA,
+    multipart: {
+      file: {
+        name: 'e2e-multidept.txt',
+        mimeType: 'text/plain',
+        buffer: Buffer.from(content, 'utf-8'),
+      },
+      title,
+      department_ids: JSON.stringify([deptA, deptB]),
+    },
+  });
+  expect(uploadRes.status()).toBe(200);
+  const uploadBody = await uploadRes.json();
+  expect(uploadBody.code).toBe(0);
+  expect(uploadBody.data.department_ids).toEqual([deptA, deptB]);
+  const documentId = uploadBody.data.id;
+
+  // ---------- UI：管理员审批通过 ----------
+  await page.goto(`${WEB}/login`);
+  await page.getByLabel('账号').fill('admin');
+  await page.getByLabel('密码').fill(adminPassword);
+  await page.getByRole('button', { name: '登 录' }).click();
+  await expect(page).toHaveURL(/search/);
+
+  await page.goto(`${WEB}/admin/approvals`);
+  await expect(page.getByRole('heading', { name: '审批中心' })).toBeVisible();
+  const row = page.getByRole('row', { name: new RegExp(title) });
+  await expect(row).toBeVisible();
+  await row.getByRole('button', { name: '通过' }).click();
+  await page.getByRole('button', { name: '确定' }).click();
+  await expect(row).toHaveCount(0, { timeout: 45_000 });
+
+  // ---------- 断言：A/B 可检索，第三部门不可见（API 检索权限口径） ----------
+  const search = async (headers) => request.get(`${API}/search`, { headers, params: { q: uniquePhrase } });
+  const idsOf = async (headers) => {
+    const r = await search(headers);
+    expect(r.status()).toBe(200);
+    const body = await r.json();
+    return ((body.data && body.data.items) || []).map((it) => it.id);
+  };
+  const [idsA, idsB, idsZ] = await Promise.all([idsOf(headersA), idsOf(headersB), idsOf(headersZ)]);
+  expect(idsA).toContain(documentId);
+  expect(idsB).toContain(documentId);
+  expect(idsZ).not.toContain(documentId);
+});
+
 test('L0 失败注入冒烟（teardown 清理验证专用）', { tag: ['L0', 'affects:infra'] }, async () => {
   base.skip(process.env.EDMS_E2E_FORCE_FAIL !== '1', '未设置 EDMS_E2E_FORCE_FAIL，跳过失败注入');
   expect(1).toBe(2);

@@ -52,8 +52,11 @@
           <el-table-column label="来源" width="90">
             <template #default="{ row }">{{ SOURCE_LABEL[row.source] || row.source }}</template>
           </el-table-column>
-          <el-table-column label="部门" width="110" show-overflow-tooltip>
-            <template #default="{ row }">{{ row.department_name || '公开' }}</template>
+          <el-table-column label="部门" width="160" show-overflow-tooltip>
+            <template #default="{ row }">
+              <span v-if="departmentLabel(row)">{{ departmentLabel(row) }}</span>
+              <span v-else class="muted">公开</span>
+            </template>
           </el-table-column>
           <el-table-column label="状态" width="92">
             <template #default="{ row }">
@@ -157,17 +160,25 @@
         <el-form-item label="标题">
           <el-input v-model="uploadForm.title" placeholder="留空则取文件名" />
         </el-form-item>
-        <el-form-item label="部门">
+        <el-form-item label="可见部门">
           <el-select
-            v-model="uploadForm.department_id"
-            placeholder="留空 = 公开"
-            clearable
+            v-model="uploadForm.department_ids"
+            multiple
+            collapse-tags
+            collapse-tags-tooltip
+            placeholder="留空 = 公开（全员可见）"
             style="width: 100%"
-            :disabled="isDeptAdmin"
           >
-            <el-option v-for="d in departments" :key="d.id" :label="d.name" :value="d.id" />
+            <el-option
+              v-for="d in departments"
+              :key="d.id"
+              :label="d.name"
+              :value="d.id"
+              :disabled="isDeptAdmin && userStore.user?.department_id !== d.id"
+            />
           </el-select>
           <div v-if="isDeptAdmin" class="form-tip">部门管理员仅可向本部门或公开直入库</div>
+          <div v-else class="form-tip">可勾选多个部门；不选 = 公开（全员可见）</div>
         </el-form-item>
         <el-form-item v-if="uploading" label="进度">
           <el-progress :percentage="uploadProgress" :stroke-width="10" style="width: 100%" />
@@ -192,13 +203,27 @@
     </el-dialog>
 
     <!-- 改部门弹窗 -->
-    <el-dialog v-model="deptVisible" title="修改文档所属部门" width="400px" destroy-on-close>
-      <el-select v-model="newDeptId" placeholder="选择部门" style="width: 100%">
-        <el-option v-for="d in departments" :key="d.id" :label="d.name" :value="d.id" />
+    <el-dialog v-model="deptVisible" title="修改文档所属部门" width="440px" destroy-on-close>
+      <el-select
+        v-model="newDeptIds"
+        multiple
+        collapse-tags
+        collapse-tags-tooltip
+        placeholder="留空 = 公开；可勾选多个部门"
+        style="width: 100%"
+      >
+        <el-option
+          v-for="d in departments"
+          :key="d.id"
+          :label="d.name"
+          :value="d.id"
+          :disabled="isDeptAdmin && userStore.user?.department_id !== d.id"
+        />
       </el-select>
+      <div class="form-tip">公开文档对全员可见；部门管理员仅可改为含本部门或公开。</div>
       <template #footer>
         <el-button @click="deptVisible = false">取消</el-button>
-        <el-button type="primary" :loading="deptLoading" :disabled="newDeptId == null" @click="submitChangeDept">
+        <el-button type="primary" :loading="deptLoading" @click="submitChangeDept">
           确定
         </el-button>
       </template>
@@ -239,7 +264,7 @@ const filters = ref({ status: '', department_id: null, file_type: '', source: ''
 const uploadVisible = ref(false)
 const uploadRef = ref(null)
 const uploadFileList = ref([])
-const uploadForm = ref({ title: '', department_id: null })
+const uploadForm = ref({ title: '', department_ids: [] })
 const uploading = ref(false)
 const uploadProgress = ref(0)
 
@@ -249,11 +274,26 @@ const previewDoc = ref(null)
 const previewTitle = computed(() =>
   previewDoc.value ? `原文预览：${previewDoc.value.title}` : '原文预览')
 
-// 改部门
+// 改部门（S7：多选）
 const deptVisible = ref(false)
 const deptDoc = ref(null)
-const newDeptId = ref(null)
+const newDeptIds = ref([])
 const deptLoading = ref(false)
+
+function departmentLabel(row) {
+  const depts = Array.isArray(row?.departments) && row.departments.length
+    ? row.departments.map((d) => d.name).join('、')
+    : null
+  if (depts) return depts
+  if (row?.department_name) return row.department_name
+  return ''
+}
+
+function deptIdsOf(row) {
+  if (Array.isArray(row?.department_ids)) return [...row.department_ids]
+  if (row?.department_id != null) return [row.department_id]
+  return []
+}
 
 async function fetchList() {
   loading.value = true
@@ -342,7 +382,7 @@ function onMoreCommand(cmd, row) {
     handleRegenSummary(row)
   } else if (cmd === 'dept') {
     deptDoc.value = row
-    newDeptId.value = row.department_id
+    newDeptIds.value = deptIdsOf(row)
     deptVisible.value = true
   } else if (cmd === 'delete') {
     handleDelete(row)
@@ -368,7 +408,9 @@ async function handleRegenSummary(row) {
 async function submitChangeDept() {
   deptLoading.value = true
   try {
-    await adminApi.patchDocument(deptDoc.value.id, { department_id: newDeptId.value })
+    await adminApi.patchDocument(deptDoc.value.id, {
+      department_ids: newDeptIds.value || [],
+    })
     ElMessage.success('部门已更新')
     deptVisible.value = false
     fetchList()
@@ -412,7 +454,8 @@ function buildUploadForm(file, updateIfDuplicate) {
   const fd = new FormData()
   fd.append('file', file)
   if (uploadForm.value.title.trim()) fd.append('title', uploadForm.value.title.trim())
-  if (uploadForm.value.department_id != null) fd.append('department_id', uploadForm.value.department_id)
+  // S7：多部门 JSON 数组字符串；空数组=公开
+  fd.append('department_ids', JSON.stringify(uploadForm.value.department_ids || []))
   if (updateIfDuplicate) fd.append('update_if_duplicate', 'true')
   return fd
 }
@@ -487,7 +530,7 @@ async function submitUpload() {
   }
   uploadVisible.value = false
   uploadFileList.value = []
-  uploadForm.value = { title: '', department_id: null }
+  uploadForm.value = { title: '', department_ids: [] }
   page.value = 1
   fetchList()
 }
@@ -498,7 +541,7 @@ async function fetchDepartments() {
     departments.value = (await authApi.departments()) || []
     if (isDeptAdmin.value && userStore.user?.department_id != null) {
       // 部门管理员默认上传到本部门
-      uploadForm.value.department_id = userStore.user.department_id
+      uploadForm.value.department_ids = [userStore.user.department_id]
     }
   } catch (e) {
     /* 拦截器已提示 */

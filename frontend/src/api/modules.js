@@ -27,7 +27,7 @@ export const authApi = {
 
 // ---------------- 文档 ----------------
 export const docApi = {
-  /** 上传（multipart：file + title） */
+  /** 上传（multipart：file + title + department_ids，S7 多部门） */
   upload(formData) {
     return unwrap(http.post('/documents/upload', formData))
   },
@@ -89,11 +89,11 @@ export const adminApi = {
   documents(params) {
     return unwrap(http.get('/admin/documents', { params }))
   },
-  /** 管理端直入库上传（multipart：file + title + department_id） */
+  /** 管理端直入库上传（multipart：file + title + department_id/department_ids，S7 多部门） */
   upload(formData) {
     return http.post('/admin/documents/upload', formData)
   },
-  /** 文档管理操作：重点标记 / 上架下架 / 改部门 */
+  /** 文档管理操作：重点标记 / 上架下架 / 改部门（支持 department_ids 多值） */
   patchDocument(id, payload) {
     return unwrap(http.patch(`/admin/documents/${id}`, payload))
   },

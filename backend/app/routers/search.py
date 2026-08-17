@@ -16,6 +16,8 @@ from ..cache import cache
 from ..db import get_db
 from ..deps import get_current_user
 from ..errors import bad_request
+from ..document_departments import (attach_department_sets, get_dept_epoch,
+                                       visible_document_cond, visible_document_filter)
 from ..search_service import hybrid_search
 from ..summary import get_display_summary
 from ..visibility import dept_visible
@@ -65,15 +67,20 @@ STOP_WORDS_2 = frozenset(
 
 
 def _document_snapshot(doc: models.Document) -> dict:
+    from ..document_departments import get_doc_dept_pairs
+    pairs = get_doc_dept_pairs(doc) or []
     return {
         "id": doc.id, "title": doc.title, "file_name": doc.file_name,
         "file_type": doc.file_type, "file_size": doc.file_size,
         "status": doc.status, "is_featured": doc.is_featured,
-        "source": doc.source, "department_id": doc.department_id,
+        "source": doc.source,
+        "department_id": pairs[0][0] if pairs else None,
+        "department_name": pairs[0][1] if pairs else None,
+        "departments": [{"id": did, "name": name} for did, name in pairs],
+        "department_ids": [did for did, _ in pairs],
         "summary": get_display_summary(doc),  # F17：文档摘要（有则用，否则截取）
         "created_at": doc.created_at.isoformat() if doc.created_at else None,
     }
-
 
 @router.get("")
 def search(
@@ -100,7 +107,7 @@ def search(
     if department_id is not None and user.role != models.ROLE_ADMIN:
         raise bad_request("仅管理员可按部门筛选")
 
-    cache_key = (f"search:{user.id}:{q}:{department_id}:{file_type}:{source}:"
+    cache_key = (f"search:{get_dept_epoch()}:{user.id}:{q}:{department_id}:{file_type}:{source}:"
                  f"{is_featured}:{sort}:{page}:{page_size}")
     cached = cache.get(cache_key)
     if cached is not None:
@@ -129,6 +136,8 @@ def search(
 
     total = len(results)
     start = (page - 1) * page_size
+    page_docs = [r["doc"] for r in results[start:start + page_size]]
+    attach_department_sets(db, page_docs)
     items = [_document_snapshot(r["doc"]) | {"snippet": r["snippet"],
                                              "score": round(r["score"], 4)}
              for r in results[start:start + page_size]]
@@ -156,14 +165,13 @@ def _filter_cache(db: Session, user: models.User, items: list[dict]) -> list[dic
     if not items:
         return []
     ids = [it["id"] for it in items]
-    dept_cond = "1=1" if user.role == models.ROLE_ADMIN else \
-        "(department_id IS NULL OR department_id = :dept)"
+    dept_cond, dept_params = visible_document_cond(user, doc_id_col="id")
     # ids 来自缓存快照（int），内联避免 SQLite text() expanding IN 问题
     ids_str = ",".join(str(i) for i in ids)
     rows = db.execute(
         text(f"SELECT id FROM document WHERE id IN ({ids_str}) "
              f"AND status='approved' AND {dept_cond}"),
-        {"dept": user.department_id},
+        {**dept_params},
     ).fetchall()
     valid = {r[0] for r in rows}
     return [it for it in items if it["id"] in valid]
@@ -237,20 +245,19 @@ def suggest(
         return schemas.ok({"items": []})
     page_size = max(1, min(int(page_size), SUGGEST_PAGE_SIZE))
 
-    cache_key = f"suggest:{user.id}:{q}"
+    cache_key = f"suggest:{get_dept_epoch()}:{user.id}:{q}"
     cached = cache.get(cache_key)
     if cached is not None:
         items = cached["items"]
         # 可见性兜底（Evaluator 发现：文档下架/改部门后有 300s 泄露窗口）
         if items:
             ids = [it["id"] for it in items]
-            dept_cond = "1=1" if user.role == models.ROLE_ADMIN else \
-                "(department_id IS NULL OR department_id = :dept)"
+            dept_cond, dept_params = visible_document_cond(user, doc_id_col="id")
             ids_str = ",".join(str(i) for i in ids)
             rows = db.execute(
                 text(f"SELECT id FROM document WHERE id IN ({ids_str}) "
                      f"AND status='approved' AND {dept_cond}"),
-                {"dept": user.department_id},
+                {**dept_params},
             ).fetchall()
             valid = {r[0] for r in rows}
             items = [it for it in items if it["id"] in valid]
@@ -259,10 +266,7 @@ def suggest(
     base = db.query(models.Document).filter(
         models.Document.status == models.STATUS_APPROVED)
     if user.role != models.ROLE_ADMIN:
-        base = base.filter(or_(
-            models.Document.department_id.is_(None),
-            models.Document.department_id == user.department_id,
-        ))
+        base = visible_document_filter(base, user)
 
     items: list[dict] = []
     seen: set[str] = set()

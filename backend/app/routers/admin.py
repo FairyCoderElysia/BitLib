@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from .. import models, schemas
+from .. import document_departments, fts, models, schemas, vector_store
 from ..audit import client_ip, log_action
 from ..db import get_db
 from ..deps import require_admin, require_dept_admin
@@ -27,6 +27,7 @@ from ..errors import (CODE_INTERNAL, BizError, bad_request, conflict, forbidden,
 from ..ingest import ingest_document
 from ..routers.documents import _prepare_upload, delete_stored_file
 from ..security import hash_password
+from ..visibility import dept_managed
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ def _pending_query(db: Session, current_user: models.User):
     """审批中心可见 pending：admin 全部 / dept_admin 仅本部门。"""
     q = db.query(models.Document).filter(models.Document.status == models.STATUS_PENDING)
     if current_user.role == models.ROLE_DEPT_ADMIN:
-        q = q.filter(models.Document.department_id == current_user.department_id)
+        q = document_departments.managed_document_filter(q, current_user)
     return q
 
 
@@ -47,7 +48,7 @@ def _assert_approvable(db: Session, document_id: int, current_user: models.User)
     if doc is None:
         raise not_found("文档不存在")
     if current_user.role == models.ROLE_DEPT_ADMIN and \
-            doc.department_id != current_user.department_id:
+            not dept_managed(current_user, doc):
         raise forbidden("无权审批其他部门的文档")
     if doc.status != models.STATUS_PENDING:
         raise bad_request(f"当前状态 {doc.status} 不可审批")
@@ -67,6 +68,7 @@ def pending_documents(page: int = 1, page_size: int = 20,
     q = _pending_query(db, current_user)
     items, total = schemas.paginate(
         q.order_by(models.Document.created_at.desc()), page, page_size)
+    document_departments.attach_department_sets(db, items)
     return schemas.ok({
         "total": total, "page": page, "page_size": page_size,
         "items": [schemas.document_to_dict(d) for d in items],
@@ -217,30 +219,38 @@ def direct_upload(
     file: UploadFile = File(...),
     title: str = Form(""),
     department_id: Optional[int] = Form(None),
+    department_ids: Optional[str] = Form(None),
     update_if_duplicate: bool = Form(False),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_dept_admin),
 ):
     """管理端直入库上传（跳过审批，直接走解析入库管线）。
 
-    - admin：可指定任意部门或公开（department_id 空）
-    - dept_admin：仅本部门或公开
-    - update_if_duplicate=true 且重复文件有权限时走更新为新版本通道（F2/F8 修复）
+    - admin：可指定任意部门集合或公开（空）；
+    - dept_admin：仅可「空（公开）」或「集合含本部门」，否则 403；
+    - department_ids 有值优先，否则回退旧 department_id 单值，缺省则公开；
+    - update_if_duplicate=true 且重复文件有权限时走更新为新版本通道（F2/F8 修复）。
     """
-    if current_user.role == models.ROLE_DEPT_ADMIN and \
-            department_id is not None and department_id != current_user.department_id:
-        raise forbidden("部门管理员仅可向本部门或公开直入库")
-    if department_id is not None and db.get(models.Department, department_id) is None:
-        raise bad_request("部门不存在")
+    ids = document_departments.parse_department_ids(department_ids)
+    if ids is not None:
+        ids = document_departments.validate_department_ids(db, ids)
+    elif department_id is not None:
+        ids = document_departments.validate_department_ids(db, [department_id])
+    else:
+        ids = []
+    if current_user.role == models.ROLE_DEPT_ADMIN:
+        if ids and current_user.department_id not in ids:
+            raise forbidden("部门管理员仅可向本部门或公开直入库")
 
     doc, is_update = _prepare_upload(
-        db, file, title, department_id=department_id,
+        db, file, title, department_id=(min(ids) if ids else None),
         source=models.SOURCE_UPLOAD,
         uploaded_by=current_user.id,
         update_if_duplicate=update_if_duplicate,
         current_user=current_user,
         upload_source_label="admin_upload",
-        request=request)
+        request=request,
+        department_ids=ids)
     if not is_update:
         doc.status = models.STATUS_PROCESSING  # 直入库先置 processing，随后入库
         db.add(doc)
@@ -248,7 +258,8 @@ def direct_upload(
         ingest_document(db, doc)
         log_action(db, current_user, "direct_upload", "document", doc.id,
                    {"file_name": doc.file_name, "status": doc.status,
-                    "department_id": department_id}, client_ip(request))
+                    "department_ids": ids}, client_ip(request))
+    document_departments.attach_department_sets(db, [doc])
     return schemas.ok(schemas.document_to_dict(doc))
 @router.post("/documents/{document_id}/reprocess")
 def reprocess_document(document_id: int,
@@ -263,7 +274,7 @@ def reprocess_document(document_id: int,
     if doc is None:
         raise not_found("文档不存在")
     if current_user.role == models.ROLE_DEPT_ADMIN and \
-            doc.department_id != current_user.department_id:
+            not dept_managed(current_user, doc):
         raise forbidden("无权操作其他部门的文档")
     if doc.status not in (models.STATUS_FAILED, models.STATUS_OFFLINE):
         raise bad_request(f"仅 failed/offline 文档可重新入库，当前状态 {doc.status}")
@@ -292,7 +303,7 @@ def regenerate_summary(document_id: int,
     if doc is None:
         raise not_found("文档不存在")
     if current_user.role == models.ROLE_DEPT_ADMIN and \
-            doc.department_id != current_user.department_id:
+            not dept_managed(current_user, doc):
         raise forbidden("无权操作其他部门的文档")
     if doc.status != models.STATUS_APPROVED or not doc.content_text:
         raise bad_request("仅已入库（approved）且有正文的文档可重新生成摘要")
@@ -349,6 +360,7 @@ class DocumentPatch(BaseModel):
     is_featured: Optional[bool] = None
     status: Optional[str] = None          # offline（下架）或 approved（上架）
     department_id: Optional[int] = None
+    department_ids: Optional[list[int]] = None   # S7：多部门集合（空数组=公开）
 
 
 @router.patch("/documents/{document_id}")
@@ -366,7 +378,7 @@ def patch_document(document_id: int,
     if doc is None:
         raise not_found("文档不存在")
     if current_user.role == models.ROLE_DEPT_ADMIN and \
-            doc.department_id != current_user.department_id:
+            not dept_managed(current_user, doc):
         raise forbidden("无权操作其他部门的文档")
 
     changes = []
@@ -382,20 +394,38 @@ def patch_document(document_id: int,
                 raise bad_request("该文档从未入库成功，请先重新入库（reprocess）")
         doc.status = body.status
         changes.append(f"status={body.status}")
-    if body.department_id is not None:
-        if db.get(models.Department, body.department_id) is None:
-            raise bad_request("部门不存在")
-        doc.department_id = body.department_id
-        changes.append(f"department_id={body.department_id}")
+    if body.department_ids is not None:
+        ids = document_departments.validate_department_ids(db, list(body.department_ids))
+    elif body.department_id is not None:
+        ids = document_departments.validate_department_ids(db, [body.department_id])
+    else:
+        ids = None
+    if ids is not None:
+        # 权限边界（F1-B4/B4-2）：admin 任意；dept_admin 仅可「空（公开）」或「含本部门」
+        if current_user.role == models.ROLE_DEPT_ADMIN:
+            if ids and current_user.department_id not in ids:
+                raise forbidden("部门管理员仅可将文档改为本部门可见或公开")
+        document_departments.set_doc_departments(db, doc, ids, invalidate_cache=True)
+        changes.append(f"department_ids={ids}")
     db.add(doc)
     db.commit()
+    if ids is not None:
+        # Chroma 部门快照 best-effort 刷新（仅观测，不参与授权）
+        try:
+            vector_store.refresh_document_department_snapshot(doc.id, doc.department_id)
+        except Exception:
+            logger.warning("改部门后 Chroma 部门快照刷新失败（忽略，doc=%s）", doc.id)
     if changes:
         log_action(db, current_user, "patch_document", "document", doc.id,
                    {"file_name": doc.file_name, "changes": changes},
                    client_ip(request))
+    document_departments.attach_department_sets(db, [doc])
     return schemas.ok({"id": doc.id, "status": doc.status,
                        "is_featured": doc.is_featured,
-                       "department_id": doc.department_id})
+                       "department_id": doc.department_id,
+                       "departments": [{"id": did, "name": name}
+                                       for did, name in document_departments.get_doc_dept_pairs(doc)],
+                       "department_ids": document_departments.get_doc_dept_ids(doc)})
 
 
 # ---------------- 文档管理列表 / 删除 ----------------
@@ -420,13 +450,16 @@ def list_documents(status: Optional[str] = None,
     page_size = min(max(1, page_size), 100)
     q = db.query(models.Document)
     if current_user.role == models.ROLE_DEPT_ADMIN:
-        q = q.filter(models.Document.department_id == current_user.department_id)
+        q = document_departments.managed_document_filter(q, current_user)
     if status:
         if status not in DOC_STATUS_FILTERS:
             raise bad_request(f"非法状态值：{status}")
         q = q.filter(models.Document.status == status)
     if department_id is not None:
-        q = q.filter(models.Document.department_id == department_id)
+        # S7：部门筛选参数改为「可见集合包含该部门」（admin 使用；单部门行为不变）
+        q = q.filter(models.Document.id.in_(
+            db.query(models.DocumentDepartment.document_id).filter(
+                models.DocumentDepartment.department_id == department_id)))
     if source:
         if source not in (models.SOURCE_UPLOAD, models.SOURCE_CRAWL):
             raise bad_request(f"非法来源：{source}")
@@ -437,6 +470,7 @@ def list_documents(status: Optional[str] = None,
         q = q.filter(models.Document.is_featured.is_(is_featured))
     items, total = schemas.paginate(
         q.order_by(models.Document.created_at.desc()), page, page_size)
+    document_departments.attach_department_sets(db, items)
     return schemas.ok({
         "total": total, "page": page, "page_size": page_size,
         "items": [schemas.document_to_dict(d) for d in items],
@@ -456,11 +490,18 @@ def delete_document(document_id: int,
     if doc is None:
         raise not_found("文档不存在")
     if current_user.role == models.ROLE_DEPT_ADMIN and \
-            doc.department_id != current_user.department_id:
+            not dept_managed(current_user, doc):
         raise forbidden("无权操作其他部门的文档")
     delete_stored_file(doc)
     db.query(models.ChunkParent).filter(
         models.ChunkParent.document_id == doc.id).delete(synchronize_session=False)
+    db.query(models.DocumentDepartment).filter(
+        models.DocumentDepartment.document_id == doc.id).delete(
+        synchronize_session=False)
+    try:
+        fts.delete_document(db, doc.id)
+    except Exception:
+        logger.warning("删除文档 %s 时 FTS 行删除失败（忽略）", doc.id)
     log_action(db, current_user, "document_delete", "document", doc.id,
                {"file_name": doc.file_name, "title": doc.title}, client_ip(request))
     db.delete(doc)
@@ -582,6 +623,14 @@ def delete_user(user_id: int,
         delete_stored_file(doc)
         db.query(models.ChunkParent).filter(
             models.ChunkParent.document_id == doc.id).delete(synchronize_session=False)
+        db.query(models.DocumentDepartment).filter(
+            models.DocumentDepartment.document_id == doc.id).delete(
+            synchronize_session=False)
+        try:
+            fts.delete_document(db, doc.id)
+        except Exception:
+            logger.warning("删除用户 %s 的上传文档 %s 时 FTS 行删除失败（忽略）",
+                           user_id, doc.id)
         db.delete(doc)
 
     # 其审批过的文档解绑审批人
@@ -614,7 +663,9 @@ def list_departments_admin(db: Session = Depends(get_db),
             "user_count": db.query(models.User).filter(
                 models.User.department_id == d.id).count(),
             "doc_count": db.query(models.Document).filter(
-                models.Document.department_id == d.id).count(),
+                models.Document.id.in_(
+                    db.query(models.DocumentDepartment.document_id).filter(
+                        models.DocumentDepartment.department_id == d.id))).count(),
             "crawl_task_count": db.query(models.CrawlTask).filter(
                 models.CrawlTask.target_department_id == d.id).count(),
         })
@@ -673,8 +724,12 @@ def delete_department(department_id: int,
     refs = []
     if db.query(models.User).filter(models.User.department_id == department_id).first():
         refs.append("用户")
-    if db.query(models.Document).filter(models.Document.department_id == department_id).first():
-        refs.append("文档")
+    if "文档" not in refs:
+        if (db.query(models.Document).filter(
+                models.Document.department_id == department_id).first()
+                or db.query(models.DocumentDepartment).filter(
+                    models.DocumentDepartment.department_id == department_id).first()):
+            refs.append("文档")
     if db.query(models.CrawlTask).filter(
             models.CrawlTask.target_department_id == department_id).first():
         refs.append("爬虫任务")
@@ -789,7 +844,7 @@ def stats(db: Session = Depends(get_db),
     # 文档按状态分组（本部门过滤）
     dq = db.query(models.Document)
     if dept_id is not None:
-        dq = dq.filter(models.Document.department_id == dept_id)
+        dq = document_departments.managed_document_filter(dq, current_user)
     doc_rows = dq.with_entities(models.Document.status,
                                 func.count(models.Document.id)).group_by(
         models.Document.status).all()

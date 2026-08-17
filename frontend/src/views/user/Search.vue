@@ -18,7 +18,7 @@
         <el-button type="primary" size="large" :loading="loading" @click="onSearch">
           搜索
         </el-button>
-        <el-button size="large" plain :icon="Upload" @click="uploadVisible = true">
+        <el-button size="large" plain :icon="Upload" @click="openUpload">
           上传文档
         </el-button>
       </div>
@@ -135,6 +135,19 @@
         <el-form-item label="标题">
           <el-input v-model="uploadTitle" placeholder="留空则取文件名" maxlength="255" />
         </el-form-item>
+        <el-form-item label="可见部门">
+          <el-select
+            v-model="uploadDeptIds"
+            multiple
+            collapse-tags
+            collapse-tags-tooltip
+            placeholder="选择可见部门"
+            style="width: 100%"
+          >
+            <el-option v-for="d in departments" :key="d.id" :label="d.name" :value="d.id" />
+          </el-select>
+          <div class="form-tip">可勾选多个部门（默认本部门）；不选 = 公开（全员可见）</div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="uploadVisible = false">取消</el-button>
@@ -149,9 +162,10 @@
 <script setup>
 import { ref, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useUserStore } from '@/stores/user'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Upload, UploadFilled } from '@element-plus/icons-vue'
-import { searchApi, docApi } from '@/api/modules'
+import { searchApi, docApi, authApi } from '@/api/modules'
 import { FILE_TYPE_LABEL, FILE_TYPE_TAG, SOURCE_LABEL, formatSize, formatTime } from '@/utils/format'
 import { highlight } from '@/utils/highlight'
 
@@ -176,10 +190,14 @@ let suggestSeq = 0
 let suggestTimer = null
 
 // 上传文档（走审批）
+const userStore = useUserStore()
 const uploadVisible = ref(false)
 const selectedFile = ref(null)
 const uploadTitle = ref('')
 const uploading = ref(false)
+const departments = ref([])
+// S7：可见部门多选，默认本部门，可清空=公开
+const uploadDeptIds = ref([])
 
 // 顶栏搜索跳转 /search?q=xxx 时同步关键词并重新检索
 watch(
@@ -285,8 +303,17 @@ function onSelectCandidate(item) {
 }
 
 // URL 直接带 q 进入时自动检索
+async function loadDepartments() {
+  try {
+    departments.value = (await authApi.departments()) || []
+  } catch (e) {
+    departments.value = []
+  }
+}
+
 onMounted(() => {
   loadHotWords()
+  loadDepartments()
   if (keyword.value.trim()) fetchList()
 })
 
@@ -307,6 +334,8 @@ function buildUploadForm(updateIfDuplicate) {
   const fd = new FormData()
   fd.append('file', selectedFile.value.raw)
   if (uploadTitle.value.trim()) fd.append('title', uploadTitle.value.trim())
+  // S7：多部门（JSON 数组字符串）；空数组=公开
+  fd.append('department_ids', JSON.stringify(uploadDeptIds.value || []))
   if (updateIfDuplicate) fd.append('update_if_duplicate', 'true')
   return fd
 }
@@ -318,6 +347,12 @@ async function uploadOnce(updateIfDuplicate) {
 }
 
 /** 普通用户上传：POST /documents/upload → pending 待审批；重复且可更新时提示更新为新版本 */
+function openUpload() {
+  // 默认勾选本部门（无部门用户默认公开空数组）
+  uploadDeptIds.value = userStore.user?.department_id != null ? [userStore.user.department_id] : []
+  uploadVisible.value = true
+}
+
 async function submitUpload() {
   if (!selectedFile.value) return
   uploading.value = true
@@ -355,6 +390,7 @@ async function submitUpload() {
     uploadVisible.value = false
     selectedFile.value = null
     uploadTitle.value = ''
+    uploadDeptIds.value = []
   } catch (e) {
     if (e?.message !== 'cancelled') {
       /* 错误提示由拦截器统一弹出 */

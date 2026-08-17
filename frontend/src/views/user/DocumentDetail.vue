@@ -80,7 +80,10 @@
         <el-descriptions class="meta" :column="4" border>
           <el-descriptions-item label="文件名">{{ detail.file_name }}</el-descriptions-item>
           <el-descriptions-item label="文件大小">{{ formatSize(detail.file_size) }}</el-descriptions-item>
-          <el-descriptions-item label="所属部门">{{ detail.department_name || '公开' }}</el-descriptions-item>
+          <el-descriptions-item label="所属部门">
+            <span v-if="departmentNames">{{ departmentNames }}</span>
+            <span v-else>公开</span>
+          </el-descriptions-item>
           <el-descriptions-item label="上传时间">{{ formatTime(detail.created_at) }}</el-descriptions-item>
           <el-descriptions-item v-if="detail.reject_reason" label="拒绝原因" :span="4">
             <span class="reject-reason">{{ detail.reject_reason }}</span>
@@ -170,6 +173,15 @@ const favVisible = ref(false)
 const favoriteId = ref(null)
 
 const isFavorited = computed(() => favoriteId.value != null)
+
+// S7：所属部门展示（优先 departments 多部门字段；回退旧 department_name）
+const departmentNames = computed(() => {
+  const depts = detail.value?.departments
+  if (Array.isArray(depts) && depts.length) {
+    return depts.map((d) => d.name || `#${d.id}`).join('、')
+  }
+  return detail.value?.department_name || ''
+})
 
 // txt / md 且已通过审批 → 直显文本
 const canPreviewText = computed(

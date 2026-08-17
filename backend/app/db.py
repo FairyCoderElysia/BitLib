@@ -162,12 +162,37 @@ def _migrate_columns() -> None:
         logger.warning("Sprint8 迁移列失败（降级继续）：%s", exc)
 
 
+def _migrate_document_departments() -> None:
+    """S7：把既有单部门数据等价迁移为连接表单元素集合（幂等）。
+
+    - department_id IS NOT NULL 的文档：插入 (document_id, department_id)，已存在则跳过；
+    - department_id IS NULL（公开）的文档：集合保持为空；
+    - 建索引：document_department(document_id) / (department_id) 幂等 CREATE INDEX。
+    异常降级警告、不阻塞启动（与 _migrate_columns 一致）。
+    """
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_document_department_document_id "
+                "ON document_department(document_id)"))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_document_department_department_id "
+                "ON document_department(department_id)"))
+            conn.execute(text(
+                "INSERT OR IGNORE INTO document_department(document_id, department_id) "
+                "SELECT id, department_id FROM document WHERE department_id IS NOT NULL"))
+        logger.info("DocumentDepartment 连接表迁移完成（幂等）")
+    except Exception as exc:
+        logger.warning("DocumentDepartment 迁移失败（降级继续）：%s", exc)
+
+
 def init_db() -> str | None:
-    """初始化：建目录 → 建表（含 FTS）→ 老库补列 → 播种。返回首次 admin 初始密码。"""
+    """初始化：建目录 → 建表（含 FTS）→ 老库补列 → 多部门连接表迁移 → 播种。返回首次 admin 初始密码。"""
     from . import models  # noqa: F401  确保模型已注册到 Base.metadata
 
     _ensure_dirs()
     Base.metadata.create_all(bind=engine)
     _migrate_columns()
+    _migrate_document_departments()
     _create_fts_table()
     return _seed_defaults()

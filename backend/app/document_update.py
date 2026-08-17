@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from . import models
 from .audit import client_ip, log_action
 from .errors import bad_request, forbidden
+from .visibility import dept_managed
 from .ingest import ingest_document_update
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,7 @@ def has_update_permission(user: models.User, doc: models.Document) -> bool:
     if user.role == models.ROLE_ADMIN:
         return True
     if user.role == models.ROLE_DEPT_ADMIN:
-        return doc.department_id is not None and doc.department_id == user.department_id
+        return dept_managed(user, doc)
     if user.role == models.ROLE_USER:
         return doc.uploaded_by is not None and doc.uploaded_by == user.id
     return False

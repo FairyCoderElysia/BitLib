@@ -100,22 +100,8 @@ def delete_by_document(document_id: int) -> None:
     col.delete(where={"document_id": document_id})
 
 
-def query(embedding: list[float], top_k: int,
-          user_department_id: int | None = None, is_admin: bool = False) -> list[dict]:
-    """按可见性过滤的向量召回（召回阶段权限过滤）。
-
-    仅取 status=approved；非管理员限 公开(department_id="") 或 本部门。
-    返回 [{document_id, parent_id, chunk_index, text, distance}]（distance 升序）。
-    """
-    col = _get_collection()
-    if is_admin:
-        where = {"status": STATUS_APPROVED}
-    else:
-        depts = [PUBLIC_DEPT, str(user_department_id)] if user_department_id else [PUBLIC_DEPT]
-        # Chroma where 顶层多 key 不合法，需显式 $and
-        where = {"$and": [{"status": STATUS_APPROVED},
-                          {"department_id": {"$in": depts}}]}
-    res = col.query(query_embeddings=[embedding], n_results=top_k, where=where)
+def _to_hits(res) -> list[dict]:
+    """把 Chroma query 结果整理为命中字典列表（保持原始 distance 顺序）。"""
     hits = []
     if res and res.get("ids") and res["ids"][0]:
         metas = res["metadatas"][0]
@@ -128,8 +114,82 @@ def query(embedding: list[float], top_k: int,
                 "text": res["documents"][0][i],
                 "distance": res["distances"][0][i],
                 "status": m.get("status"),
+                "department_id": m.get("department_id", PUBLIC_DEPT),
             })
     return hits
+
+
+def query(embedding: list[float], top_k: int,
+          user_department_id: int | None = None, is_admin: bool = False,
+          db=None, user=None) -> list[dict]:
+    """向量召回（S7：多取候选 + 回表 dept_visible 后置过滤）。
+
+    - fetch_k = max(top_k * 4, 60)：只按 status=approved 召回更多候选，
+      部门维度不再信任 Chroma 单值 metadata（其 department_id 仅为主部门快照）；
+    - 提供 db/user 时：按 candidate 的 document_id 回表 SQLite，逐个 dept_visible
+      校验后按 distance 升序截断 top_k（以连接表为权威，改部门即时生效）；
+    - 未提供 db/user（启动健康检查 / 旧内部调用）：回退 metadata 部门过滤，
+      保持旧签名兼容。
+    返回 [{document_id, parent_id, chunk_index, text, distance, status, department_id}]。
+    """
+    col = _get_collection()
+    fetch_k = max(top_k * 4, 60)
+    where = {"status": STATUS_APPROVED}
+    res = col.query(query_embeddings=[embedding], n_results=fetch_k, where=where)
+    hits = _to_hits(res)
+
+    if is_admin:
+        return hits[:top_k]
+    if db is not None and user is not None:
+        return _post_filter(db, user, hits)[:top_k]
+
+    # 兼容旧调用（无 db）：仍按 metadata 单值 department_id 过滤（公开 + 本部门）
+    depts = [PUBLIC_DEPT]
+    if user_department_id is not None:
+        depts.append(str(user_department_id))
+    return [h for h in hits if h.get("department_id") in depts][:top_k]
+
+
+def _post_filter(db, user, hits: list[dict]) -> list[dict]:
+    """回表可见性后置过滤：仅保留 status=approved 且 dept_visible(user, doc) 的候选。"""
+    if not hits:
+        return []
+    from . import models
+    from .visibility import dept_visible
+
+    ids = sorted({h.get("document_id") for h in hits if h.get("document_id") is not None})
+    docs = {}
+    if ids:
+        rows = db.query(models.Document).filter(models.Document.id.in_(ids)).all()
+        docs = {d.id: d for d in rows}
+    out = []
+    for h in hits:
+        d = docs.get(h.get("document_id"))
+        if d is None or d.status != STATUS_APPROVED:
+            continue
+        if not dept_visible(user, d):
+            continue
+        out.append(h)
+    return out
+
+
+def refresh_document_department_snapshot(document_id: int, department_id: int | None) -> None:
+    """best-effort 刷新某文档全部 child 的 department_id 快照（仅观测用途，不参与授权）。
+
+    Chroma 单值 metadata 天然无法表达多部门集合；授权一律回表 SQLite，此处仅为
+    让观测快照尽量收敛。失败只告警，不影响主流程。
+    """
+    try:
+        col = _get_collection()
+        res = col.get(where={"document_id": document_id})
+        ids = res.get("ids") or []
+        if not ids:
+            return
+        col.update(ids=list(ids), metadatas=[{
+            "department_id": "" if department_id is None else str(department_id),
+        }] * len(ids))
+    except Exception as exc:
+        logger.warning("刷新文档 %s 的 Chroma 部门快照失败（忽略）: %s", document_id, exc)
 
 
 def count_by_document(document_id: int) -> int:
@@ -187,18 +247,16 @@ def get_document_vector(document_id: int, updated_at=None) -> list[float] | None
 
 def query_similar_documents(document_vector: list[float], exclude_document_id: int,
                             top_k: int = 5, user_department_id: int | None = None,
-                            is_admin: bool = False) -> list[dict]:
+                            is_admin: bool = False, db=None, user=None) -> list[dict]:
     """按可见性过滤的文档级相似查询（spec F18）。
 
-    1) 用现有 query()（已按 status=approved + 公开/本部门过滤）多取候选：
-       n_results = max(top_k * 4, 20)（去重后保证足量，超库内数量时 Chroma 自动截断）；
-    2) 按 document_id 去重，每文档取最小 distance（该文档与目标最近的 child 距离），
-       排除 exclude_document_id（自身）；
+    1) 复用 query()（S7：多取候选 + 回表 dept_visible 后置过滤）多取候选；
+    2) 按 document_id 去重，每文档取最小 distance，排除 exclude_document_id（自身）；
     3) 升序取 top_k。返回 [{document_id, distance}]。
-    排除自身在应用层做（Chroma where 组合 $ne 与现有 $and 复杂且易错）。
     """
     hits = query(document_vector, max(top_k * 4, 20),
-                 user_department_id=user_department_id, is_admin=is_admin)
+                 user_department_id=user_department_id, is_admin=is_admin,
+                 db=db, user=user)
     best: dict[int, float] = {}
     for h in hits:
         did = h["document_id"]

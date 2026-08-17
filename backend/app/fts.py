@@ -3,7 +3,7 @@
 
 - FTS5 external content 表（document_fts）不自动同步行，应用层维护
 - jieba 分词（空格 join）后写入 title / content_text，配合 unicode61 tokenizer 实现中文词匹配
-- 冗余 department_id / status 列支撑召回阶段权限过滤（M4 检索用）
+- 冗余 department_id / status 列：department_id 仅存「主部门」快照（观测），
 """
 import logging
 
@@ -24,7 +24,10 @@ def _dept_str(department_id: int | None) -> str:
 
 
 def sync_document(db, doc) -> None:
-    """插入/更新文档的 FTS 行（先删后插）。调用方负责 commit。"""
+    """插入/更新文档的 FTS 行（先删后插）。调用方负责 commit。
+
+    department_id 冗余列写主部门快照；授权一律不回读该列（S7 连接表为准）。
+    """
     db.execute(text(f"DELETE FROM {_FTS_TABLE} WHERE rowid=:id"), {"id": doc.id})
     db.execute(
         text(f"INSERT INTO {_FTS_TABLE}(rowid, title, content_text, department_id, status) "

@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """混合检索（spec §6.3 / F3）：关键词(FTS bm25) + 语义(Chroma) 双路召回 → RRF 融合 → 重排。
 
-- 双路均在召回阶段按可见性过滤（FTS 冗余列 / Chroma metadata），不可见文档不进入后续计算
+- 双路均在召回阶段按可见性过滤：关键词路走连接表 EXISTS 子查询；语义路多取候选 + 回表
+  dept_visible 后置过滤（不信任 Chroma 单值 metadata 授权）
 - 重排后做兜底权限校验（防脏数据）
 """
 import logging
@@ -13,9 +14,11 @@ from sqlalchemy.orm import Session
 
 from . import models
 from .config import settings
+from .document_departments import visible_document_cond
 from .embeddings import embed
 from .rerank import rerank
 from .vector_store import query as vector_query
+from .visibility import dept_visible
 
 logger = logging.getLogger(__name__)
 
@@ -35,22 +38,16 @@ def keyword_recall(db: Session, user: models.User, query: str, top_k: int = RECA
     # 时精确匹配会漏。每个 token 加 `*` 前缀（"知识*" 命中"知识库"），
     # 由 RRF + 重排负责排序与过滤（用户反馈：搜"知识"无结果）。
     match = " OR ".join(f"{t}*" for t in tokens)
-    # 部门过滤：admin 跳过（历史 bug：admin department_id 为 None 时被限成仅公开文档）
-    if user.role == models.ROLE_ADMIN:
-        dept_clause = ""
-    else:
-        dept_list = [""]
-        if user.department_id is not None:
-            dept_list.append(str(user.department_id))
-        placeholders = ",".join(f"'{d}'" for d in dept_list)  # 可信值（int/常量）
-        dept_clause = f"AND department_id IN ({placeholders}) "
+    # S7：部门过滤改为连接表 EXISTS/子查询（document_fts 的 department_id 仅为主部门快照，
+    # 不再作为授权依据）；admin 不做过部门过滤。
+    dept_clause, dept_params = visible_document_cond(user, doc_id_col="rowid")
     sql = (
         "SELECT rowid FROM document_fts "
-        "WHERE document_fts MATCH :kw AND status = 'approved' " +
-        dept_clause +
-        "ORDER BY bm25(document_fts) LIMIT :lim"
+        "WHERE document_fts MATCH :kw AND status = 'approved' "
+        "AND " + dept_clause +
+        " ORDER BY bm25(document_fts) LIMIT :lim"
     )
-    params = {"kw": match, "lim": top_k}
+    params = {"kw": match, "lim": top_k, **dept_params}
     try:
         rows = db.execute(text(sql), params).fetchall()
     except Exception as exc:  # FTS 特殊字符等导致 MATCH 语法错误 → 降级空召回
@@ -67,9 +64,11 @@ def semantic_recall(db: Session, user: models.User, query: str, top_k: int = REC
     """
     try:
         emb = embed([query])[0]
+        # S7：向量路不复用 Chroma 单值 metadata 做授权；多取候选 + 回表 dept_visible 后置过滤
         return vector_query(emb, top_k,
                             user_department_id=user.department_id,
-                            is_admin=user.role == models.ROLE_ADMIN)
+                            is_admin=user.role == models.ROLE_ADMIN,
+                            db=db, user=user)
     except Exception as exc:
         logger.warning("语义召回失败，降级关键词路（Chroma 不可用/索引重建中）: %s", exc)
         return []
@@ -180,9 +179,5 @@ def hybrid_search(db: Session, user: models.User, query: str,
 
 
 def _dept_visible_after(user: models.User, doc: models.Document) -> bool:
-    """兜底可见性校验（等价 dept_visible，避免循环 import）。"""
-    if user.role == models.ROLE_ADMIN:
-        return True
-    if doc.department_id is None:
-        return True
-    return doc.department_id == user.department_id
+    """兜底可见性校验：统一调用 visibility.dept_visible（集合口径）。"""
+    return dept_visible(user, doc)

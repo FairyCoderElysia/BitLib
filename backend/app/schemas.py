@@ -83,6 +83,18 @@ def user_to_dict(user) -> dict:
 
 
 def document_to_dict(doc) -> dict:
+    # S7：新增 departments / department_ids；保留旧 department_id / department_name
+    # 兼容字段（主部门 = 集合最小 id；集合空时两者为 null）。
+    from .document_departments import get_doc_dept_pairs
+    pairs = get_doc_dept_pairs(doc) or []
+    department_ids = [did for did, _ in pairs]
+    primary_id = department_ids[0] if department_ids else None
+    primary_name = None
+    if pairs:
+        names = {did: name for did, name in pairs}
+        primary_name = names.get(primary_id)
+    elif doc.department_id is not None:
+        primary_name = doc.department.name if doc.department else None
     return {
         "id": doc.id,
         "title": doc.title,
@@ -90,8 +102,10 @@ def document_to_dict(doc) -> dict:
         "file_type": doc.file_type,
         "file_size": doc.file_size,
         "status": doc.status,
-        "department_id": doc.department_id,
-        "department_name": doc.department.name if doc.department else None,
+        "department_id": primary_id,
+        "department_name": primary_name,
+        "departments": [{"id": did, "name": name} for did, name in pairs],
+        "department_ids": department_ids,
         "source": doc.source,
         "is_featured": doc.is_featured,
         "summary": get_display_summary(doc),  # F17：摘要（pending/rejected 为截取/空）

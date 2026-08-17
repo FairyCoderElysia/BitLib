@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from .. import document_update, models, schemas, vector_store
+from .. import document_departments, document_update, fts, models, schemas, vector_store
 from ..audit import client_ip, log_action
 from ..config import settings
 from ..db import get_db
@@ -132,7 +132,8 @@ def _prepare_upload(db: Session, upload: UploadFile, title: str,
                     update_if_duplicate: bool = False,
                     current_user: Optional[models.User] = None,
                     upload_source_label: str = "user_upload",
-                    request: Optional[Request] = None) -> Tuple[models.Document, bool]:
+                    request: Optional[Request] = None,
+                    department_ids: Optional[List[int]] = None) -> Tuple[models.Document, bool]:
     """公共上传逻辑：落盘 + sha256 去重 + 建 pending 记录或更新为新版本。
 
     返回 (doc, is_update)：
@@ -168,6 +169,13 @@ def _prepare_upload(db: Session, upload: UploadFile, title: str,
             raise
         return doc, True
 
+    # S7：department_ids 优先；否则回退单值 department_id；再缺省为空集合（公开）。
+    # 部门合法性校验已在调用方（写文件之前）完成，此处不产生残留半写入。
+    if department_ids is None:
+        final_ids = [department_id] if department_id is not None else []
+    else:
+        final_ids = list(department_ids)
+
     file_name = upload.filename or store_name
     doc_title = (title or "").strip() or Path(file_name).stem
     doc = models.Document(
@@ -178,12 +186,20 @@ def _prepare_upload(db: Session, upload: UploadFile, title: str,
         file_size=size,
         file_hash=sha256_hex,
         status=models.STATUS_PENDING,
-        department_id=department_id,
+        department_id=(min(final_ids) if final_ids else None),
         source=source,
         uploaded_by=uploaded_by,
     )
-    db.add(doc)
-    db.commit()
+    try:
+        db.add(doc)
+        db.flush()  # 取得 doc.id
+        # 主表 department_id + 连接表同事务落库；pending 不写 FTS（入库时再写）
+        document_departments.set_doc_departments(db, doc, final_ids, sync_fts=False)
+        db.commit()
+    except Exception:
+        db.rollback()
+        Path(settings.upload_dir, store_name).unlink(missing_ok=True)
+        raise
     db.refresh(doc)
     return doc, False
 
@@ -193,23 +209,38 @@ def upload_document(
     request: Request,
     file: UploadFile = File(...),
     title: str = Form(""),
+    department_id: Optional[int] = Form(None),
+    department_ids: Optional[str] = Form(None),
     update_if_duplicate: bool = Form(False),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """普通用户上传：→ pending，归属上传者部门（无部门=公开）。
+    """普通用户上传：→ pending。可见部门多选（默认本部门；空=公开）。
 
-    重复文件且 update_if_duplicate=true 且有权限时走更新为新版本通道（F2/F8 修复）。
+    - department_ids 有值 → 以其为准；否则回退旧 department_id 单值；
+      两者都缺省 → 默认 [当前用户.department_id]（无部门则 [] 公开）。
+    - 校验失败在写文件前返回 400，不创建记录、不残留文件。
+      重复文件且 update_if_duplicate=true 且有权限时走更新为新版本通道（F2/F8 修复）。
     """
+    ids = document_departments.parse_department_ids(department_ids)
+    if ids is not None:
+        ids = document_departments.validate_department_ids(db, ids)
+    elif department_id is not None:
+        ids = document_departments.validate_department_ids(db, [department_id])
+    else:
+        ids = ([current_user.department_id]
+               if current_user.department_id is not None else [])
+
     doc, is_update = _prepare_upload(
         db, file, title,
-        department_id=current_user.department_id,
+        department_id=(min(ids) if ids else None),
         source=models.SOURCE_UPLOAD,
         uploaded_by=current_user.id,
         update_if_duplicate=update_if_duplicate,
         current_user=current_user,
         upload_source_label="user_upload",
-        request=request)
+        request=request,
+        department_ids=ids)
     if not is_update:
         log_action(db, current_user, "upload", "document", doc.id,
                    {"file_name": doc.file_name, "file_size": doc.file_size,
@@ -315,6 +346,7 @@ def my_documents(page: int = 1, page_size: int = 20,
     q = db.query(models.Document).filter(models.Document.uploaded_by == current_user.id)
     items, total = schemas.paginate(
         q.order_by(models.Document.created_at.desc()), page, page_size)
+    document_departments.attach_department_sets(db, items)
     return schemas.ok({
         "total": total, "page": page, "page_size": page_size,
         "items": [schemas.document_to_dict(d) for d in items],
@@ -335,6 +367,13 @@ def withdraw_document(document_id: int,
     if doc.status != models.STATUS_PENDING:
         raise bad_request(f"仅 pending 状态文档可撤回，当前状态：{doc.status}")
     delete_stored_file(doc)
+    db.query(models.DocumentDepartment).filter(
+        models.DocumentDepartment.document_id == doc.id).delete(
+        synchronize_session=False)
+    try:
+        fts.delete_document(db, doc.id)
+    except Exception:
+        logger.warning("撤回文档 %s 时 FTS 行删除失败（忽略）", doc.id)
     log_action(db, current_user, "withdraw", "document", doc.id,
                {"file_name": doc.file_name, "status": models.STATUS_PENDING},
                client_ip(request))
@@ -351,6 +390,7 @@ def document_detail(document_id: int,
     doc = db.get(models.Document, document_id)
     if doc is None or not can_access(current_user, doc):
         raise not_found("文档不存在或无权访问")
+    document_departments.attach_department_sets(db, [doc])
     data = schemas.document_to_dict(doc)
     if doc.status == models.STATUS_APPROVED:
         data["content_text"] = doc.content_text
@@ -380,24 +420,29 @@ def related_documents(document_id: int,
     cands = vector_store.query_similar_documents(
         vec, exclude_document_id=document_id, top_k=5,
         user_department_id=current_user.department_id,
-        is_admin=current_user.role == models.ROLE_ADMIN)
+        is_admin=current_user.role == models.ROLE_ADMIN,
+        db=db, user=current_user)
     ids = [c["document_id"] for c in cands]
     docs = {}
     if ids:
         docs = {d.id: d for d in db.query(models.Document).filter(
             models.Document.id.in_(ids)).all()}
     items = []
+    document_departments.attach_department_sets(db, list(docs.values()))
     for c in cands:
         d = docs.get(c["document_id"])
         if d is None or d.status != models.STATUS_APPROVED or not dept_visible(current_user, d):
             continue
+        pairs = document_departments.get_doc_dept_pairs(d)
         items.append({
             "id": d.id,
             "title": d.title,
             "file_type": d.file_type,
             "summary": get_display_summary(d),
             "source": d.source,
-            "department_name": d.department.name if d.department else None,
+            "department_name": pairs[0][1] if pairs else None,
+            "departments": [{"id": did, "name": name} for did, name in pairs],
+            "department_ids": [did for did, _ in pairs],
             "distance": c["distance"],
         })
     return schemas.ok(items)

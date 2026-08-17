@@ -88,9 +88,37 @@ class Document(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     department = relationship("Department")
+    # S7：文档多部门可见。departments 为只读视图（写路径统一走
+    # document_departments.set_doc_departments 维护连接表）；
+    # 授权判定一律读连接表集合，department_id 仅为主部门兼容列/快照。
+    departments = relationship(
+        "Department",
+        secondary="document_department",
+        viewonly=True,
+        order_by="Department.id",
+    )
     uploader = relationship("User", foreign_keys=[uploaded_by])
     approver = relationship("User", foreign_keys=[approver_id])
     parents = relationship("ChunkParent", back_populates="document")
+
+
+class DocumentDepartment(Base):
+    """文档-部门多对多连接表（S7：文档可属于 0..N 个部门）。
+
+    - 非空集合 = 可见部门集合；空集合 = 公开（全员可见）。
+    - Document.department_id 恒等于集合中 id 最小的部门（空集合则为 NULL），
+      由 document_departments.set_doc_departments 统一同步；仅作兼容/快照，
+      不作为授权依据。
+    """
+    __tablename__ = "document_department"
+    __table_args__ = (
+        UniqueConstraint("document_id", "department_id",
+                         name="uq_document_department_doc_dept"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    document_id = Column(Integer, ForeignKey("document.id"), nullable=False, index=True)
+    department_id = Column(Integer, ForeignKey("department.id"), nullable=False, index=True)
 
 
 class ChunkParent(Base):

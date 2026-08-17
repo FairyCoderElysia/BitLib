@@ -83,18 +83,28 @@ def list_favorites(db: Session = Depends(get_db),
             .filter(models.Favorite.user_id == user.id)
             .order_by(models.Favorite.created_at.desc())
             .all())
+    ids = [f.document_id for f in favs if f.document_id is not None]
+    docs = {}
+    if ids:
+        docs = {d.id: d for d in db.query(models.Document).filter(
+            models.Document.id.in_(ids)).all()}
+    from ..document_departments import attach_department_sets
+    attach_department_sets(db, list(docs.values()))
     items = []
     for f in favs:
-        doc = db.get(models.Document, f.document_id)
+        doc = docs.get(f.document_id)
         if doc is None:
             # 文档已删除：条目标记"已失效"（spec F5），不报错
             items.append({"id": f.id, "folder_id": f.folder_id,
                           "document_id": f.document_id,
                           "is_valid": False, "document": None})
             continue
+        # F1-C1：文档被改到本用户不可见集合/下架后，不泄露、不报错，按无权限处理
+        valid = (doc.status == models.STATUS_APPROVED and dept_visible(user, doc))
         items.append({"id": f.id, "folder_id": f.folder_id,
-                      "is_valid": doc.status == models.STATUS_APPROVED,
-                      "document": schemas.document_to_dict(doc)})
+                      "document_id": f.document_id,
+                      "is_valid": valid,
+                      "document": schemas.document_to_dict(doc) if valid else None})
     return schemas.ok({"items": items})
 
 
