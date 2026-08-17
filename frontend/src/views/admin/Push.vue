@@ -26,15 +26,17 @@
       </el-form-item>
       <el-form-item label="目标部门">
         <el-select
-          v-model="form.department_id"
-          placeholder="留空 = 全员"
+          v-model="form.department_ids"
+          placeholder="留空 = 全员；可多选目标部门"
+          multiple
           clearable
+          collapse-tags
+          collapse-tags-tooltip
           style="width: 100%"
-          :disabled="isDeptAdmin"
         >
           <el-option v-for="d in departments" :key="d.id" :label="d.name" :value="d.id" />
         </el-select>
-        <div v-if="isDeptAdmin" class="form-tip">部门管理员仅可向本部门或全员推送</div>
+        <div v-if="isDeptAdmin" class="form-tip">部门管理员仅可向全员或包含本部门的组合推送（后端 403 兜底）</div>
       </el-form-item>
       <el-form-item>
         <el-button type="primary" :loading="submitting" :disabled="!form.title.trim()" @click="handleSubmit">
@@ -55,7 +57,7 @@ import { FILE_TYPE_LABEL } from '@/utils/format'
 const userStore = useUserStore()
 const isDeptAdmin = computed(() => userStore.role === 'dept_admin')
 
-const form = ref({ title: '', content: '', document_id: null, department_id: null })
+const form = ref({ title: '', content: '', document_id: null, department_ids: [] })
 const departments = ref([])
 const docOptions = ref([])
 const submitting = ref(false)
@@ -67,10 +69,12 @@ async function handleSubmit() {
       title: form.value.title.trim(),
       content: form.value.content.trim(),
       document_id: form.value.document_id ?? null,
-      department_id: form.value.department_id ?? null,
+      department_ids: form.value.department_ids?.length
+        ? [...form.value.department_ids]
+        : [],
     })
     ElMessage.success('推送已发布')
-    form.value = { title: '', content: '', document_id: null, department_id: null }
+    form.value = { title: '', content: '', document_id: null, department_ids: [] }
   } catch (e) {
     /* 拦截器已提示 */
   } finally {
@@ -88,7 +92,7 @@ async function fetchOptions() {
     docOptions.value = docs.items || []
     departments.value = depts || []
     if (isDeptAdmin.value && userStore.user?.department_id != null) {
-      form.value.department_id = userStore.user.department_id
+      form.value.department_ids = [userStore.user.department_id]
     }
   } catch (e) {
     /* 拦截器已提示 */

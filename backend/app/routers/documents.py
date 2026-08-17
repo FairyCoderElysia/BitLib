@@ -114,8 +114,14 @@ def save_upload(upload: UploadFile) -> Tuple[str, str, int, str]:
 
 
 def delete_stored_file(doc) -> None:
-    """删除文档对应的私有文件（存在则删）。"""
-    target = Path(settings.upload_dir) / doc.file_path
+    """删除文档对应的私有文件（存在则删）。
+
+    爬虫直入库文档 file_path 为空（无私有文件），跳过避免误删 upload 目录。
+    """
+    file_path = getattr(doc, "file_path", None)
+    if not file_path:
+        return
+    target = Path(settings.upload_dir) / file_path
     target.unlink(missing_ok=True)
 
 

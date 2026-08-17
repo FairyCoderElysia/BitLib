@@ -18,7 +18,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from .. import document_departments, fts, models, schemas, vector_store
+from .. import (document_departments, fts, models,
+                push_notification_departments, schemas, vector_store)
 from ..audit import client_ip, log_action
 from ..db import get_db
 from ..deps import require_admin, require_dept_admin
@@ -667,7 +668,9 @@ def list_departments_admin(db: Session = Depends(get_db),
                     db.query(models.DocumentDepartment.document_id).filter(
                         models.DocumentDepartment.department_id == d.id))).count(),
             "crawl_task_count": db.query(models.CrawlTask).filter(
-                models.CrawlTask.target_department_id == d.id).count(),
+                models.CrawlTask.id.in_(
+                    db.query(models.CrawlTaskDepartment.task_id).filter(
+                        models.CrawlTaskDepartment.department_id == d.id))).count(),
         })
     return schemas.ok({"items": items})
 
@@ -733,6 +736,17 @@ def delete_department(department_id: int,
     if db.query(models.CrawlTask).filter(
             models.CrawlTask.target_department_id == department_id).first():
         refs.append("爬虫任务")
+    if db.query(models.CrawlTaskDepartment).filter(
+            models.CrawlTaskDepartment.department_id == department_id).first():
+        if "爬虫任务" not in refs:
+            refs.append("爬虫任务")
+    if db.query(models.PushNotification).filter(
+            models.PushNotification.department_id == department_id).first():
+        refs.append("推送通知")
+    if db.query(models.PushNotificationDepartment).filter(
+            models.PushNotificationDepartment.department_id == department_id).first():
+        if "推送通知" not in refs:
+            refs.append("推送通知")
     if refs:
         raise conflict("该部门下存在" + "、".join(refs) + "，无法删除")
     db.delete(d)
@@ -784,7 +798,9 @@ class PushCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=128)
     content: Optional[str] = ""
     document_id: Optional[int] = None
-    department_id: Optional[int] = None
+    department_id: Optional[int] = Field(default=None, description="目标部门（单值兼容），空=全员")
+    department_ids: Optional[list[int]] = Field(
+        default=None, description="目标部门集合（空数组=全员）")
 
 
 @router.post("/push")
@@ -794,15 +810,22 @@ def create_push(body: PushCreate,
                 current_user: models.User = Depends(require_dept_admin)):
     """创建推送（spec F10 / §6.5 推送流）。
 
-    - admin：任意部门或空（全员）
-    - dept_admin：department_id 必须等于其部门或空（全员）
-    创建写审计日志。
+    - admin：任意集合或空（全员）；
+    - dept_admin：仅可空（全员）或「集合含本部门」，否则 403（F3-4）。
+    department_ids 提供值（含 []）优先，否则回退旧 department_id 单值。
     """
-    if current_user.role == models.ROLE_DEPT_ADMIN and \
-            body.department_id not in (None, current_user.department_id):
-        raise forbidden("部门管理员仅可向本部门或全员推送")
-    if body.department_id is not None and db.get(models.Department, body.department_id) is None:
-        raise bad_request("部门不存在")
+    if body.department_ids is not None:
+        dept_ids = document_departments.validate_department_ids(
+            db, list(body.department_ids))
+    elif body.department_id is not None:
+        dept_ids = document_departments.validate_department_ids(
+            db, [body.department_id])
+    else:
+        dept_ids = []
+    if current_user.role == models.ROLE_DEPT_ADMIN:
+        # 空=全员 允许；非空必须包含本部门
+        if dept_ids and current_user.department_id not in dept_ids:
+            raise forbidden("部门管理员仅可向本部门或全员推送")
     if body.document_id is not None and db.get(models.Document, body.document_id) is None:
         raise bad_request("关联文档不存在")
 
@@ -810,20 +833,48 @@ def create_push(body: PushCreate,
         title=body.title.strip(),
         content=body.content or "",
         document_id=body.document_id,
-        department_id=body.department_id,
+        department_id=(min(dept_ids) if dept_ids else None),
         created_by=current_user.id,
     )
     db.add(n)
+    db.flush()
+    push_notification_departments.set_push_departments(db, n, dept_ids)
     db.commit()
     db.refresh(n)
     log_action(db, current_user, "push_create", "push_notification", n.id,
                {"title": n.title, "department_id": n.department_id,
+                "department_ids": dept_ids,
                 "document_id": n.document_id}, client_ip(request))
+    pairs = push_notification_departments.get_push_dept_pairs(n)
     return schemas.ok({
         "id": n.id, "title": n.title, "content": n.content,
         "document_id": n.document_id, "department_id": n.department_id,
+        "department_ids": [did for did, _ in pairs],
+        "departments": [{"id": did, "name": nm} for did, nm in pairs],
         "created_by": n.created_by, "created_at": n.created_at,
     })
+
+
+@router.delete("/push/{notification_id}")
+def delete_push(notification_id: int,
+                request: Request,
+                db: Session = Depends(get_db),
+                current_user: models.User = Depends(require_admin)):
+    """删除推送（S7 D7）：admin 专属；应用层显式清理 push_notification_department 行。"""
+    n = db.get(models.PushNotification, notification_id)
+    if n is None:
+        raise not_found("推送不存在")
+    log_action(db, current_user, "push_delete", "push_notification", n.id,
+               {"title": n.title}, client_ip(request))
+    db.query(models.PushNotificationDepartment).filter(
+        models.PushNotificationDepartment.notification_id == n.id).delete(
+        synchronize_session=False)
+    db.query(models.PushRead).filter(
+        models.PushRead.notification_id == n.id).delete(
+        synchronize_session=False)
+    db.delete(n)
+    db.commit()
+    return schemas.ok({"id": notification_id, "deleted": True})
 
 
 # ---------------- 工作台统计（spec F13） ----------------
@@ -851,10 +902,12 @@ def stats(db: Session = Depends(get_db),
     doc_by_status = {s: c for s, c in doc_rows}
     doc_total = sum(doc_by_status.values())
 
-    # 爬虫任务（dept_admin 仅统计 target_department_id=本部门的任务）
+    # 爬虫任务（dept_admin 仅统计「目标部门集合含本部门」的任务；公开任务不计入）
     cq = db.query(models.CrawlTask)
     if dept_id is not None:
-        cq = cq.filter(models.CrawlTask.target_department_id == dept_id)
+        cq = cq.filter(models.CrawlTask.id.in_(
+            db.query(models.CrawlTaskDepartment.task_id).filter(
+                models.CrawlTaskDepartment.department_id == dept_id)))
     crawl_enabled = cq.filter(models.CrawlTask.enabled.is_(True)).count()
     crawl_disabled = cq.filter(models.CrawlTask.enabled.is_(False)).count()
 

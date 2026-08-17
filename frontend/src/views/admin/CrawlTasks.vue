@@ -63,8 +63,8 @@
               <div class="task-url muted">{{ (row.start_urls || []).join('，') }}</div>
             </template>
           </el-table-column>
-          <el-table-column label="目标部门" width="100">
-            <template #default="{ row }">{{ deptName(row.target_department_id) }}</template>
+          <el-table-column label="目标部门" width="180">
+            <template #default="{ row }">{{ deptNames(row) }}</template>
           </el-table-column>
           <el-table-column label="cron" width="110">
             <template #default="{ row }">
@@ -142,7 +142,15 @@
           <el-input v-model="form.schedule" placeholder="如 0 9 * * *；留空 = 仅手动执行" />
         </el-form-item>
         <el-form-item label="目标部门">
-          <el-select v-model="form.target_department_id" placeholder="留空 = 公开" clearable style="width: 100%">
+          <el-select
+            v-model="form.target_department_ids"
+            placeholder="留空 = 公开（全员可见）"
+            multiple
+            clearable
+            collapse-tags
+            collapse-tags-tooltip
+            style="width: 100%"
+          >
             <el-option v-for="d in departments" :key="d.id" :label="d.name" :value="d.id" />
           </el-select>
         </el-form-item>
@@ -190,12 +198,19 @@ const form = ref({
   max_depth: 1,
   schedule: '',
   enabled: false,
-  target_department_id: null,
+  target_department_ids: [],
 })
 
-function deptName(id) {
-  const d = departments.value.find((x) => x.id === id)
-  return d ? d.name : '公开'
+/** 列表「目标部门」列：优先多部门展示，空/无集合 → 公开 */
+function deptNames(row) {
+  const ids = row.target_department_ids?.length
+    ? row.target_department_ids
+    : (row.target_department_id != null ? [row.target_department_id] : [])
+  if (!ids.length) return '公开'
+  return ids.map((id) => {
+    const d = departments.value.find((x) => x.id === id)
+    return d ? d.name : String(id)
+  }).join('、')
 }
 
 /** 逗号 / 换行分隔 → 数组 */
@@ -225,7 +240,7 @@ function openCreate() {
   editingId.value = null
   form.value = {
     name: '', startUrls: '', allowedDomains: '', selector: '',
-    max_depth: 1, schedule: '', enabled: false, target_department_id: null,
+    max_depth: 1, schedule: '', enabled: false, target_department_ids: [],
   }
   formVisible.value = true
 }
@@ -240,7 +255,9 @@ function openEdit(row) {
     max_depth: row.max_depth,
     schedule: row.schedule || '',
     enabled: row.enabled,
-    target_department_id: row.target_department_id ?? null,
+    target_department_ids: row.target_department_ids?.length
+      ? [...row.target_department_ids]
+      : (row.target_department_id != null ? [row.target_department_id] : []),
   }
   formVisible.value = true
 }
@@ -255,7 +272,9 @@ async function submitForm() {
     max_depth: form.value.max_depth,
     schedule: form.value.schedule.trim(),
     enabled: form.value.enabled,
-    target_department_id: form.value.target_department_id ?? null,
+    target_department_ids: form.value.target_department_ids?.length
+      ? [...form.value.target_department_ids]
+      : [],
   }
   try {
     if (editingId.value) {

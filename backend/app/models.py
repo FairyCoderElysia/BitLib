@@ -121,6 +121,44 @@ class DocumentDepartment(Base):
     department_id = Column(Integer, ForeignKey("department.id"), nullable=False, index=True)
 
 
+class CrawlTaskDepartment(Base):
+    """爬虫任务-目标部门多对多连接表（S7 F2）。
+
+    - 非空集合 = 目标部门集合；空集合 = 公开（入库文档全员可见）。
+    - CrawlTask.target_department_id 恒等于集合中 id 最小部门（空集合为 NULL），
+      由 crawl_task_departments.set_crawl_task_departments 统一同步；仅作兼容/
+      审计快照，不作为继承与授权依据。
+    """
+    __tablename__ = "crawl_task_department"
+    __table_args__ = (
+        UniqueConstraint("task_id", "department_id",
+                         name="uq_crawl_task_department_task_dept"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    task_id = Column(Integer, ForeignKey("crawl_task.id"), nullable=False, index=True)
+    department_id = Column(Integer, ForeignKey("department.id"), nullable=False, index=True)
+
+
+class PushNotificationDepartment(Base):
+    """推送-目标部门多对多连接表（S7 F3）。
+
+    - 非空集合 = 目标部门集合；空集合 = 全员。
+    - PushNotification.department_id 恒等于集合中 id 最小部门（空集合为 NULL），
+      由 push_notification_departments.set_push_departments 统一同步；仅作兼容
+      展示，不作为可见性判定依据。
+    """
+    __tablename__ = "push_notification_department"
+    __table_args__ = (
+        UniqueConstraint("notification_id", "department_id",
+                         name="uq_push_notification_department_notif_dept"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    notification_id = Column(Integer, ForeignKey("push_notification.id"), nullable=False, index=True)
+    department_id = Column(Integer, ForeignKey("department.id"), nullable=False, index=True)
+
+
 class ChunkParent(Base):
     """父块 / 上下文单元（SQLite，~1200 token），M3 使用。"""
     __tablename__ = "chunk_parent"
@@ -179,6 +217,15 @@ class CrawlTask(Base):
     created_by = Column(Integer, ForeignKey("user.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    # S7 F2：只读目标部门集合视图（写路径统一走
+    # crawl_task_departments.set_crawl_task_departments 维护连接表）。
+    target_departments = relationship(
+        "Department",
+        secondary="crawl_task_department",
+        viewonly=True,
+        order_by="Department.id",
+    )
+
 
 class CrawlRunLog(Base):
     """爬虫运行记录（M5）。"""
@@ -208,6 +255,15 @@ class PushNotification(Base):
     department_id = Column(Integer, ForeignKey("department.id"), nullable=True)
     created_by = Column(Integer, ForeignKey("user.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    # S7 F3：只读目标部门集合视图（写路径统一走
+    # push_notification_departments.set_push_departments 维护连接表）。
+    departments = relationship(
+        "Department",
+        secondary="push_notification_department",
+        viewonly=True,
+        order_by="Department.id",
+    )
 
 
 class PushRead(Base):

@@ -18,7 +18,7 @@ from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
-from . import document_departments, models
+from . import crawl_task_departments, document_departments, models
 from .audit import log_action
 from .cleaning import MIN_TEXT_LEN, clean_text
 from .ingest import ingest_text
@@ -193,7 +193,8 @@ def _do_run(db, task, user):
                 allowed.append(host)
         max_depth = max(0, int(task.max_depth or 1))
         selector = task.selector or ""
-        target_dept = task.target_department_id
+        # S7 F2：入库继承只读连接表集合（空=公开），不信任 target_department_id 单值。
+        dept_ids = crawl_task_departments.get_crawl_task_dept_ids(task)
 
         visited = set()
         queue = deque((u, 0) for u in start_urls)
@@ -258,16 +259,15 @@ def _do_run(db, task, user):
                             source_url=url,
                             status=models.STATUS_PROCESSING,
                             source=models.SOURCE_CRAWL,
-                            department_id=target_dept,         # 继承任务目标部门（空=公开，§2.5）
+                            department_id=(min(dept_ids) if dept_ids else None),
                             uploaded_by=task.created_by,
                         )
                         db.add(doc)
                         db.flush()
-                        # 爬虫保持单部门语义（空=公开）；但统一经 set_doc_departments
-                        # 写连接表，保证可见性口径与主列/召回层一致。
+                        # F2-3：新入库文档继承任务目标部门集合（空=公开），
+                        # 统一经 F1 的 set_doc_departments 写连接表。
                         document_departments.set_doc_departments(
-                            db, doc, [target_dept] if target_dept is not None else [],
-                            sync_fts=False)
+                            db, doc, dept_ids, sync_fts=False)
                         db.commit()
                         db.refresh(doc)
                         # 直接入库（爬虫为管理员授权行为，不走审批，spec §6.2）

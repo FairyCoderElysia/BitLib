@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from .. import models, schemas
+from .. import crawl_task_departments, document_departments, models, schemas
 from ..audit import client_ip, log_action
 from ..crawler import run_crawl_task
 from ..db import get_db
@@ -35,7 +35,9 @@ class CrawlTaskIn(BaseModel):
     max_depth: int = Field(default=1, ge=0, le=5)
     schedule: str = Field(default="", description="cron 表达式，空=不定时")
     enabled: bool = False
-    target_department_id: Optional[int] = Field(default=None, description="目标部门，空=公开")
+    target_department_id: Optional[int] = Field(default=None, description="目标部门（单值兼容），空=公开")
+    target_department_ids: Optional[list[int]] = Field(
+        default=None, description="目标部门集合（空数组=公开）")
 
 
 class CrawlTaskPatch(BaseModel):
@@ -48,6 +50,8 @@ class CrawlTaskPatch(BaseModel):
     schedule: Optional[str] = None
     enabled: Optional[bool] = None
     target_department_id: Optional[int] = None
+    target_department_ids: Optional[list[int]] = Field(
+        default=None, description="目标部门集合（空数组=公开）")
 
 
 def _validate_input(db: Session, body: BaseModel) -> None:
@@ -67,9 +71,12 @@ def _validate_input(db: Session, body: BaseModel) -> None:
             CronTrigger.from_crontab(body.schedule.strip())
         except Exception:
             raise bad_request(f"cron 表达式非法：{body.schedule}")
-    if getattr(body, "target_department_id", None) is not None and \
-            db.get(models.Department, body.target_department_id) is None:
-        raise bad_request("目标部门不存在")
+    # 目标部门集合校验：target_department_ids 提供值（含 []）优先；
+    # 否则回退旧单值 target_department_id。逐项校验存在性/上限。
+    if getattr(body, "target_department_ids", None) is not None:
+        document_departments.validate_department_ids(db, list(body.target_department_ids))
+    elif getattr(body, "target_department_id", None) is not None:
+        document_departments.validate_department_ids(db, [body.target_department_id])
 
 
 def crawl_task_to_dict(task, last_log=None) -> dict:
@@ -85,6 +92,10 @@ def crawl_task_to_dict(task, last_log=None) -> dict:
         "status": task.status,
         "last_run_at": task.last_run_at,
         "target_department_id": task.target_department_id,
+        "target_department_ids": [did for did, _ in
+                                  crawl_task_departments.get_crawl_task_dept_pairs(task)],
+        "target_departments": [{"id": did, "name": nm} for did, nm in
+                               crawl_task_departments.get_crawl_task_dept_pairs(task)],
         "created_by": task.created_by,
         "created_at": task.created_at,
     }
@@ -118,6 +129,7 @@ def list_crawl_tasks(page: int = 1, page_size: int = 20,
     page_size = min(max(1, page_size), 100)
     q = db.query(models.CrawlTask)
     items, total = schemas.paginate(q.order_by(models.CrawlTask.id.desc()), page, page_size)
+    crawl_task_departments.attach_crawl_task_department_sets(db, items)
     result = []
     for t in items:
         last_log = db.query(models.CrawlRunLog).filter(
@@ -135,6 +147,13 @@ def create_crawl_task(body: CrawlTaskIn,
                       current_user: models.User = Depends(require_admin)):
     """创建爬虫任务；enabled 且 schedule 非空时同步注册 cron 调度。"""
     _validate_input(db, body)
+    if body.target_department_ids is not None:
+        dept_ids = document_departments.validate_department_ids(
+            db, list(body.target_department_ids))
+    elif body.target_department_id is not None:
+        dept_ids = document_departments.validate_department_ids(db, [body.target_department_id])
+    else:
+        dept_ids = []
     task = models.CrawlTask(
         name=body.name.strip(),
         start_urls=body.start_urls,
@@ -144,10 +163,12 @@ def create_crawl_task(body: CrawlTaskIn,
         schedule=body.schedule.strip(),
         enabled=body.enabled,
         status="idle" if body.enabled else "disabled",
-        target_department_id=body.target_department_id,
+        target_department_id=(min(dept_ids) if dept_ids else None),
         created_by=current_user.id,
     )
     db.add(task)
+    db.flush()
+    crawl_task_departments.set_crawl_task_departments(db, task, dept_ids)
     db.commit()
     db.refresh(task)
     if task.enabled and task.schedule:
@@ -168,7 +189,15 @@ def update_crawl_task(task_id: int,
     task = db.get(models.CrawlTask, task_id)
     if task is None:
         raise not_found("爬虫任务不存在")
-    # 合并现有值做公共校验（URL/白名单/cron/部门）
+    # 合并现有值做公共校验（URL/白名单/cron/目标部门集合）
+    provided_ids = "target_department_ids" in body.model_fields_set
+    provided_single = "target_department_id" in body.model_fields_set
+    if provided_ids:
+        merged_ids = list(body.target_department_ids or [])
+    elif provided_single:
+        merged_ids = [body.target_department_id] if body.target_department_id is not None else []
+    else:
+        merged_ids = crawl_task_departments.get_crawl_task_dept_ids(task)
     merged = CrawlTaskIn(
         name=body.name.strip() if body.name is not None else task.name,
         start_urls=body.start_urls if body.start_urls is not None else (task.start_urls or []),
@@ -178,9 +207,7 @@ def update_crawl_task(task_id: int,
         max_depth=body.max_depth if body.max_depth is not None else task.max_depth,
         schedule=body.schedule if body.schedule is not None else (task.schedule or ""),
         enabled=body.enabled if body.enabled is not None else task.enabled,
-        target_department_id=body.target_department_id
-        if body.target_department_id is not None or "target_department_id" in body.model_fields_set
-        else task.target_department_id,
+        target_department_ids=merged_ids,
     )
     _validate_input(db, merged)
 
@@ -203,9 +230,10 @@ def update_crawl_task(task_id: int,
     if body.schedule is not None:
         task.schedule = body.schedule.strip()
         changes.append("schedule")
-    if body.target_department_id is not None or "target_department_id" in body.model_fields_set:
-        task.target_department_id = body.target_department_id
-        changes.append("target_department_id")
+    if provided_ids or provided_single:
+        new_ids = document_departments.validate_department_ids(db, merged_ids)
+        crawl_task_departments.set_crawl_task_departments(db, task, new_ids)
+        changes.append("target_department_ids")
     if body.enabled is not None:
         task.enabled = body.enabled
         task.status = "idle" if body.enabled else "disabled"
@@ -235,6 +263,10 @@ def delete_crawl_task(task_id: int,
     _remove_task(scheduler, task.id)
     log_action(db, current_user, "crawl_task_delete", "crawl_task", task.id,
                {"name": task.name}, client_ip(request))
+    # S7 D7：连接表关联为 viewonly，必须应用层显式清理后再删任务
+    db.query(models.CrawlTaskDepartment).filter(
+        models.CrawlTaskDepartment.task_id == task.id).delete(
+        synchronize_session=False)
     db.delete(task)
     db.commit()
     return schemas.ok({"id": task_id, "deleted": True})

@@ -186,6 +186,55 @@ def _migrate_document_departments() -> None:
         logger.warning("DocumentDepartment 迁移失败（降级继续）：%s", exc)
 
 
+def _migrate_crawl_task_departments() -> None:
+    """S7 F2：把既有单目标部门爬虫任务等价迁移为连接表单元素集合（幂等）。
+
+    - target_department_id IS NOT NULL 的任务：插入 (task_id, target_department_id)；
+    - NULL（公开）任务：集合保持为空；
+    - 建 task_id / department_id 两索引（幂等 CREATE INDEX IF NOT EXISTS）。
+    异常降级警告、不阻塞启动。
+    """
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_crawl_task_department_task_id "
+                "ON crawl_task_department(task_id)"))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_crawl_task_department_department_id "
+                "ON crawl_task_department(department_id)"))
+            conn.execute(text(
+                "INSERT OR IGNORE INTO crawl_task_department(task_id, department_id) "
+                "SELECT id, target_department_id FROM crawl_task "
+                "WHERE target_department_id IS NOT NULL"))
+        logger.info("CrawlTaskDepartment 连接表迁移完成（幂等）")
+    except Exception as exc:
+        logger.warning("CrawlTaskDepartment 迁移失败（降级继续）：%s", exc)
+
+
+def _migrate_push_notification_departments() -> None:
+    """S7 F3：把既有单目标部门推送等价迁移为连接表单元素集合（幂等）。
+
+    - department_id IS NOT NULL 的推送：插入 (notification_id, department_id)；
+    - NULL（全员）推送：集合保持为空。
+    异常降级警告、不阻塞启动。
+    """
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_push_notification_department_notification_id "
+                "ON push_notification_department(notification_id)"))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_push_notification_department_department_id "
+                "ON push_notification_department(department_id)"))
+            conn.execute(text(
+                "INSERT OR IGNORE INTO push_notification_department(notification_id, department_id) "
+                "SELECT id, department_id FROM push_notification "
+                "WHERE department_id IS NOT NULL"))
+        logger.info("PushNotificationDepartment 连接表迁移完成（幂等）")
+    except Exception as exc:
+        logger.warning("PushNotificationDepartment 迁移失败（降级继续）：%s", exc)
+
+
 def init_db() -> str | None:
     """初始化：建目录 → 建表（含 FTS）→ 老库补列 → 多部门连接表迁移 → 播种。返回首次 admin 初始密码。"""
     from . import models  # noqa: F401  确保模型已注册到 Base.metadata
@@ -194,5 +243,7 @@ def init_db() -> str | None:
     Base.metadata.create_all(bind=engine)
     _migrate_columns()
     _migrate_document_departments()
+    _migrate_crawl_task_departments()
+    _migrate_push_notification_departments()
     _create_fts_table()
     return _seed_defaults()

@@ -78,7 +78,7 @@ const ALL_MENUS = [
   { path: '/admin/dashboard', title: '工作台', icon: Odometer },
   { path: '/admin/approvals', title: '审批中心', icon: Stamp },
   { path: '/admin/documents', title: '文档管理', icon: FolderOpened },
-  { path: '/admin/crawl-tasks', title: '爬虫任务', icon: Promotion },
+  { path: '/admin/crawl-tasks', title: '爬虫任务', icon: Promotion, adminOnly: true },
   { path: '/admin/users', title: '用户管理', icon: User, adminOnly: true },
   { path: '/admin/departments', title: '部门管理', icon: OfficeBuilding, adminOnly: true },
   { path: '/admin/push', title: '部门推送', icon: Bell },

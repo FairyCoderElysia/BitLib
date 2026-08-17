@@ -32,8 +32,11 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app import document_departments as dd  # noqa: E402
 from app import models, vector_store  # noqa: E402
-from app.db import SessionLocal, _migrate_document_departments  # noqa: E402
+from app.db import (SessionLocal, _migrate_crawl_task_departments,  # noqa: E402
+                    _migrate_document_departments,
+                    _migrate_push_notification_departments)
 from app.main import app  # noqa: E402
+from app import crawler as crawler_mod  # noqa: E402
 from app.routers import qa as qa_mod  # noqa: E402
 from app.search_service import semantic_recall  # noqa: E402
 from app.visibility import dept_managed, dept_visible  # noqa: E402
@@ -445,6 +448,258 @@ def main():
                     {"i": doc_xy}).fetchone()
                 assert fts_row and str(fts_row[0]) == str(Y), fts_row
             check("C8. 主表/连接表/FTS 主部门冗余一致")
+
+            # ============================================================
+            # D1-D8：爬虫任务与通知推送多部门（用户新增需求）
+            # ============================================================
+            # ---------- D1：两张新连接表 + 唯一约束 ----------
+            with SessionLocal() as db:
+                for name in ("crawl_task_department", "push_notification_department"):
+                    row = db.execute(text(
+                        "SELECT sql FROM sqlite_master WHERE type='table' AND name=:n"),
+                        {"n": name}).fetchone()
+                    assert row and row[0], f"{name} 表不存在"
+                    assert "UNIQUE" in row[0].upper() or "unique" in row[0], row[0]
+            check("D1. crawl_task_department/push_notification_department 建表（含唯一约束）")
+
+            # ---------- D2：F2/F3 启动迁移幂等 ----------
+            with SessionLocal() as db:
+                legacy_task = models.CrawlTask(
+                    name="历史单部门爬虫任务", start_urls=["http://old.test/page"],
+                    allowed_domains=["old.test"], max_depth=0,
+                    target_department_id=X, enabled=False, status="disabled",
+                    created_by=1)
+                db.add(legacy_task)
+                legacy_push = models.PushNotification(
+                    title="历史单部门推送", content="旧数据", document_id=None,
+                    department_id=Y, created_by=1)
+                db.add(legacy_push)
+                db.commit()
+                legacy_task_id = legacy_task.id
+                legacy_push_id = legacy_push.id
+            _migrate_crawl_task_departments()
+            _migrate_push_notification_departments()
+            with SessionLocal() as db:
+                r1 = db.query(models.CrawlTaskDepartment).filter(
+                    models.CrawlTaskDepartment.task_id == legacy_task_id).all()
+                assert [x.department_id for x in r1] == [X]
+                r2 = db.query(models.PushNotificationDepartment).filter(
+                    models.PushNotificationDepartment.notification_id == legacy_push_id).all()
+                assert [x.department_id for x in r2] == [Y]
+            _migrate_crawl_task_departments()
+            _migrate_push_notification_departments()
+            with SessionLocal() as db:
+                assert db.query(models.CrawlTaskDepartment).filter(
+                    models.CrawlTaskDepartment.task_id == legacy_task_id).count() == 1
+                assert db.query(models.PushNotificationDepartment).filter(
+                    models.PushNotificationDepartment.notification_id == legacy_push_id
+                ).count() == 1
+            with SessionLocal() as db:
+                db.query(models.CrawlTaskDepartment).filter(
+                    models.CrawlTaskDepartment.task_id == legacy_task_id).delete()
+                db.query(models.PushNotificationDepartment).filter(
+                    models.PushNotificationDepartment.notification_id == legacy_push_id).delete()
+                db.delete(db.get(models.CrawlTask, legacy_task_id))
+                db.delete(db.get(models.PushNotification, legacy_push_id))
+                db.commit()
+            check("D2. 旧单部门任务/推送幂等迁移为单元素集合，重复迁移不重复插行")
+            # ---------- D3：dept_admin 对爬虫创建/编辑/删除/执行均 403 ----------
+            r = c.post("/api/admin/crawl-tasks", headers=H(tdax), json={
+                "name": "越权建任务", "start_urls": ["http://d3.test/a"],
+                "allowed_domains": ["d3.test"], "max_depth": 0,
+                "target_department_ids": [X]})
+            assert r.status_code == 403, r.text
+            r = c.post("/api/admin/crawl-tasks", headers=H(admin_token), json={
+                "name": "D3权限任务", "start_urls": ["http://d3.test/b"],
+                "allowed_domains": ["d3.test"], "max_depth": 0,
+                "target_department_ids": [X, Y]})
+            assert r.status_code == 200, r.text
+            d3_task_id = r.json()["data"]["id"]
+            r = c.patch(f"/api/admin/crawl-tasks/{d3_task_id}", headers=H(tdax), json={"name": "x"})
+            assert r.status_code == 403, r.text
+            r = c.delete(f"/api/admin/crawl-tasks/{d3_task_id}", headers=H(tdax))
+            assert r.status_code == 403, r.text
+            r = c.post(f"/api/admin/crawl-tasks/{d3_task_id}/run", headers=H(tdax))
+            assert r.status_code == 403, r.text
+            check("D3. dept_admin 对爬虫 create/patch/delete/run 均 403")
+
+            # ---------- D4：爬虫入库继承集合 + 同 URL 更新保留原集合（mock fetch） ----------
+            crawl_url = "http://mock.test/s7-page"
+            phrase_crawl = f"爬虫多部门继承关键词{os.getpid()}"
+            seq = (f"{phrase_crawl}。这是很长的一段正文。{phrase_crawl} 再次出现。" * 30)
+            html1 = ("<html><head><title>爬虫多部门文档</title></head><body>"
+                     + seq + "</body></html>")
+
+            class _FakeNode:
+                def __init__(self, text=""):
+                    self._text = text
+                    self.attrib = {}
+                def get_all_text(self, separator="-"):
+                    return self._text
+
+            class _FakeCSS:
+                def __init__(self, first=None, items=()):
+                    self.first = first
+                    self._items = items
+                def __iter__(self):
+                    return iter(self._items)
+
+            class _FakeResp:
+                def __init__(self, body, title=""):
+                    self.body = body
+                    self._title = title
+                def css(self, sel):
+                    if sel == "title":
+                        node = _FakeNode(self._title)
+                        return _FakeCSS(first=node if self._title else None)
+                    return _FakeCSS(first=None, items=())
+
+            r = c.post("/api/admin/crawl-tasks", headers=H(admin_token), json={
+                "name": "D4多部门爬虫", "start_urls": [crawl_url],
+                "allowed_domains": ["mock.test"], "max_depth": 0, "enabled": False,
+                "target_department_ids": [X, Y]})
+            assert r.status_code == 200, r.text
+            d4_task = r.json()["data"]
+            assert sorted(d4_task["target_department_ids"]) == sorted([X, Y]), d4_task
+            assert d4_task["target_department_id"] == min(X, Y), d4_task
+            assert len(d4_task["target_departments"]) == 2, d4_task
+            d4_task_id = d4_task["id"]
+            with mock.patch.object(crawler_mod, "fetch_page",
+                                   return_value=_FakeResp(html1, "爬虫多部门文档")):
+                r = c.post(f"/api/admin/crawl-tasks/{d4_task_id}/run", headers=H(admin_token))
+            assert r.status_code == 200, r.text
+            assert r.json()["data"]["status"] == "success", r.json()["data"]
+            assert r.json()["data"]["ingested_count"] == 1, r.json()["data"]
+            with SessionLocal() as db:
+                cdoc = db.query(models.Document).filter(
+                    models.Document.source_url == crawl_url,
+                    models.Document.source == models.SOURCE_CRAWL).first()
+                assert cdoc is not None, "爬虫应入库新文档"
+                cdoc_id = cdoc.id
+                ids_rows = db.query(models.DocumentDepartment).filter(
+                    models.DocumentDepartment.document_id == cdoc_id).all()
+                assert sorted(x.department_id for x in ids_rows) == sorted([X, Y])
+                assert cdoc.department_id == min(X, Y)
+            for tok, expect in ((tx, True), (ty, True), (tz, False)):
+                assert (cdoc_id in search_ids(phrase_crawl, tok)) is expect, (tok,)
+            check("D4a. 新入库文档继承任务目标部门集合（X/Y 可检索、Z 不可）")
+
+            phrase_upd = f"爬虫更新后唯一关键词{os.getpid()}"
+            seq2 = (f"{phrase_upd}。更新后的正文发生了内容变化。" * 30)
+            html2 = ("<html><head><title>爬虫多部门文档v2</title></head><body>"
+                     + seq2 + "</body></html>")
+            with SessionLocal() as db:
+                cdoc = db.get(models.Document, cdoc_id)
+                dd.set_doc_departments(db, cdoc, [Z])
+                db.commit()
+            with mock.patch.object(crawler_mod, "fetch_page",
+                                   return_value=_FakeResp(html2, "爬虫多部门文档v2")):
+                r = c.post(f"/api/admin/crawl-tasks/{d4_task_id}/run", headers=H(admin_token))
+            assert r.status_code == 200, r.text
+            assert r.json()["data"]["updated_count"] == 1, r.json()["data"]
+            with SessionLocal() as db:
+                cdoc = db.get(models.Document, cdoc_id)
+                ids_rows = db.query(models.DocumentDepartment).filter(
+                    models.DocumentDepartment.document_id == cdoc_id).all()
+                assert sorted(x.department_id for x in ids_rows) == [Z], ids_rows
+                assert cdoc.title == "爬虫多部门文档v2"
+            assert cdoc_id in search_ids(phrase_upd, tz)
+            assert cdoc_id not in search_ids(phrase_upd, tx)
+            check("D4b. 同 URL 更新分支保留文档既有部门集合不变")
+            # ---------- D5：推送创建支持 department_ids（空=全员） + dept_admin 边界 ----------
+            r = c.post("/api/admin/push", headers=H(admin_token), json={
+                "title": "D5多部门推送", "content": "面向 X/Y",
+                "department_ids": [X, Y]})
+            assert r.status_code == 200, r.text
+            push_xy = r.json()["data"]
+            assert sorted(push_xy["department_ids"]) == sorted([X, Y]), push_xy
+            assert push_xy["department_id"] == min(X, Y), push_xy
+            assert len(push_xy["departments"]) == 2, push_xy
+            push_xy_id = push_xy["id"]
+            r = c.post("/api/admin/push", headers=H(admin_token), json={
+                "title": "D5全员推送", "content": "全员", "department_ids": []})
+            assert r.status_code == 200, r.text
+            push_all_id = r.json()["data"]["id"]
+            assert r.json()["data"]["department_ids"] == []
+            r = c.post("/api/admin/push", headers=H(tdax), json={
+                "title": "越权推送", "department_ids": [Y]})
+            assert r.status_code == 403, r.text
+            r = c.post("/api/admin/push", headers=H(tdax), json={
+                "title": "本部门全员工推送", "department_ids": []})
+            assert r.status_code == 200, r.text
+            r = c.post("/api/admin/push", headers=H(tdax), json={
+                "title": "本部门含X推送", "department_ids": [X, Y]})
+            assert r.status_code == 200, r.text
+            check("D5. 推送多部门保存/空=全员/保留旧字段；dept_admin 边界 403")
+
+            # ---------- D6：五个收口点按集合口径统一（admin 不特殊放权） ----------
+            r = c.get("/api/notifications", params={"page_size": 100}, headers=H(tx))
+            xd = r.json()["data"]
+            assert push_xy_id in {i["id"] for i in xd["items"]}
+            assert push_all_id in {i["id"] for i in xd["items"]}
+            assert xd["unread_count"] == xd["total"] >= 2
+            r = c.get("/api/notifications", params={"page_size": 100}, headers=H(tz))
+            zd = r.json()["data"]
+            zids = {i["id"] for i in zd["items"]}
+            assert push_all_id in zids and push_xy_id not in zids, zids
+            assert zd["unread_count"] == zd["total"]
+            r = c.get(f"/api/notifications/{push_xy_id}", headers=H(tx))
+            assert r.status_code == 200 and r.json()["data"]["is_read"] is False, r.text
+            r = c.get(f"/api/notifications/{push_xy_id}", headers=H(tz))
+            assert r.status_code == 404, r.text
+            r = c.post(f"/api/notifications/{push_xy_id}/read", headers=H(tx))
+            assert r.status_code == 200, r.text
+            r = c.get(f"/api/notifications/{push_xy_id}", headers=H(tx))
+            assert r.json()["data"]["is_read"] is True, r.json()
+            r = c.post(f"/api/notifications/{push_xy_id}/read", headers=H(tz))
+            assert r.status_code == 404, r.text
+            r = c.get("/api/notifications", params={"page_size": 100}, headers=H(tx))
+            xd2 = r.json()["data"]
+            assert xd2["unread_count"] == xd["total"] - 1, (xd2, xd)
+            r = c.get("/api/notifications", params={"page_size": 100}, headers=H(admin_token))
+            ad = r.json()["data"]
+            a_ids = {i["id"] for i in ad["items"]}
+            assert push_all_id in a_ids and push_xy_id not in a_ids, a_ids
+            check("D6. 通知列表/未读/已读统计/mark_read/详情直读按集合统一，admin 不特殊放权")
+
+            # ---------- D7：删除级联清理 + 部门删除引用检查纳入新连接表 ----------
+            r = c.post("/api/admin/departments", headers=H(admin_token), json={"name": "S7D7临时部"})
+            assert r.status_code == 200, r.text
+            temp_dept_id = r.json()["data"]["id"]
+            r = c.post("/api/admin/crawl-tasks", headers=H(admin_token), json={
+                "name": "D7临时任务", "start_urls": ["http://d7.test/a"],
+                "allowed_domains": ["d7.test"], "max_depth": 0,
+                "target_department_ids": [temp_dept_id]})
+            assert r.status_code == 200, r.text
+            t7_id = r.json()["data"]["id"]
+            r = c.post("/api/admin/push", headers=H(admin_token), json={
+                "title": "D7临时推送", "department_ids": [temp_dept_id]})
+            assert r.status_code == 200, r.text
+            p7_id = r.json()["data"]["id"]
+            r = c.delete(f"/api/admin/departments/{temp_dept_id}", headers=H(admin_token))
+            assert r.status_code == 409, r.text
+            r = c.delete(f"/api/admin/crawl-tasks/{t7_id}", headers=H(admin_token))
+            assert r.status_code == 200, r.text
+            with SessionLocal() as db:
+                assert db.query(models.CrawlTaskDepartment).filter(
+                    models.CrawlTaskDepartment.task_id == t7_id).count() == 0
+            r = c.delete(f"/api/admin/departments/{temp_dept_id}", headers=H(admin_token))
+            assert r.status_code == 409, r.text
+            r = c.delete(f"/api/admin/push/{p7_id}", headers=H(admin_token))
+            assert r.status_code == 200, r.text
+            with SessionLocal() as db:
+                assert db.query(models.PushNotificationDepartment).filter(
+                    models.PushNotificationDepartment.notification_id == p7_id).count() == 0
+                assert db.query(models.PushRead).filter(
+                    models.PushRead.notification_id == p7_id).count() == 0
+            r = c.delete(f"/api/admin/departments/{temp_dept_id}", headers=H(admin_token))
+            assert r.status_code == 200, r.text
+            r = c.delete(f"/api/admin/documents/{cdoc_id}", headers=H(admin_token))
+            assert r.status_code == 200, r.text
+            with SessionLocal() as db:
+                assert db.query(models.DocumentDepartment).filter(
+                    models.DocumentDepartment.document_id == cdoc_id).count() == 0
+            check("D7. 删除任务/推送/文档显式清理连接表；部门删除引用检查纳入新连接表")
 
         # ---------- 第二次 TestClient：重启后一致（C8） ----------
         with mock.patch("app.ingest.embed", side_effect=fake_embed), \
