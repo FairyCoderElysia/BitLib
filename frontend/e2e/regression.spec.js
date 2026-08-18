@@ -445,16 +445,99 @@ test('L1 文档详情相关推荐：approved 始终渲染区块，空态或推�
   await expect(block).toBeVisible();
   await expect(block.getByText('相关推荐')).toBeVisible();
 
-  // F2-2/F2-3：等待推荐请求完成，空态或推荐卡片二者至少其一可见
-  await expect(block.locator('.related-card, .el-empty').first()).toBeVisible({ timeout: 30_000 });
-  const hasCard = await block.locator('.related-card').first().isVisible().catch(() => false);
-  const hasEmpty = await block.getByText('暂无相关推荐').isVisible().catch(() => false);
-  expect(hasCard || hasEmpty).toBeTruthy();
+  // F2-2/F2-3：先通过 API 获知推荐数据源结果，再严格断言 UI 一致（避免 hasCard||hasEmpty 弱断言）
+  const relatedRes = await request.get(`${API}/documents/${documentId}/related`, { headers: userHeaders });
+  expect(relatedRes.status()).toBe(200);
+  const relatedData = (await relatedRes.json()).data || [];
+  if (relatedData.length > 0) {
+    await expect(block.locator('.related-card').first()).toBeVisible({ timeout: 30_000 });
+    expect(await block.locator('.related-card').count()).toBeGreaterThan(0);
+  } else {
+    await expect(block.getByText('暂无相关推荐')).toBeVisible({ timeout: 30_000 });
+  }
 
   // F2-4：非 approved 文档不渲染推荐区块
   await page.goto(`${WEB}/documents/${pendingId}`);
   await expect(page.getByRole('heading', { name: pendingTitle })).toBeVisible();
   await expect(page.locator('.related-block')).toHaveCount(0);
+});
+
+test('L1 管理端直入库多选部门：下架/上架与重复文件更新', { tag: ['L1', 'affects:admin,upload,documents'] }, async ({ request, page }) => {
+  const unique = Date.now();
+  const title = `管理端多选直入库_${unique}`;
+  const content = `管理端直入库多部门回归验证内容串${unique}，用于验证勾选多个部门、下架重新上架、以及重复文件更新为新版本。`.repeat(5);
+
+  // 管理员登录（沿用首登改密后的新密码）
+  await page.goto(`${WEB}/login`);
+  await page.getByLabel('账号').fill('admin');
+  await page.getByLabel('密码').fill(adminPassword);
+  await page.getByRole('button', { name: '登 录' }).click();
+  await expect(page).toHaveURL(/search/);
+
+  // 取部门
+  const adminLogin = await request.post(`${API}/auth/login`, { data: { username: 'admin', password: adminPassword } });
+  const adminToken = (await adminLogin.json()).data.token;
+  const adminHeaders = { Authorization: `Bearer ${adminToken}` };
+  const deptRes = await request.get(`${API}/auth/departments`, { headers: adminHeaders });
+  const depts = (await deptRes.json()).data;
+  expect(depts.length).toBeGreaterThanOrEqual(2);
+  const dept1Name = depts[0].name;
+  const dept2Name = depts[1].name;
+
+  // 打开管理端文档管理并直入库
+  await page.goto(`${WEB}/admin/documents`);
+  await page.getByRole('button', { name: '上传文档' }).click();
+  const dialog = page.locator('.el-dialog', { hasText: '上传文档（直接入库）' });
+  await dialog.waitFor();
+
+  // 选择文件
+  await dialog.locator('input[type=file]').setInputFiles({
+    name: 'admin-multi-dept.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from(content, 'utf-8'),
+  });
+  await dialog.getByPlaceholder('留空则取文件名').fill(title);
+
+  // 多选两个部门
+  await dialog.locator('.el-select').click();
+  await page.locator('.el-select-dropdown__item:visible', { hasText: dept1Name }).click();
+  await page.locator('.el-select-dropdown__item:visible', { hasText: dept2Name }).click();
+  await page.keyboard.press('Escape');
+
+  await dialog.getByRole('button', { name: '开始上传' }).click();
+  await expect(page.getByText('全部上传成功（1 个）')).toBeVisible({ timeout: 60_000 });
+
+  // 列表展示多部门
+  const row = page.locator('.el-table__row', { hasText: title }).first();
+  await expect(row).toBeVisible({ timeout: 60_000 });
+  await expect(row.getByText(`${dept1Name}、${dept2Name}`)).toBeVisible();
+
+  // 下架 -> 重新上架
+  await row.getByRole('button', { name: '下架' }).click();
+  await page.getByRole('button', { name: '确定' }).click();
+  await expect(row.getByRole('button', { name: '重新上架' })).toBeVisible({ timeout: 30_000 });
+
+  await row.getByRole('button', { name: '重新上架' }).click();
+  await page.getByRole('button', { name: '确定' }).click();
+  await expect(row.getByRole('button', { name: '下架' })).toBeVisible({ timeout: 30_000 });
+
+  // 重复文件更新为新版本：再次上传同一内容
+  await page.getByRole('button', { name: '上传文档' }).click();
+  const dialog2 = page.locator('.el-dialog', { hasText: '上传文档（直接入库）' });
+  await dialog2.waitFor();
+  await dialog2.locator('input[type=file]').setInputFiles({
+    name: 'admin-multi-dept.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from(content, 'utf-8'),
+  });
+  await dialog2.getByPlaceholder('留空则取文件名').fill(title);
+  // 重复文件可只保留一个部门；这里沿用空=公开，只要能触发更新通道即可
+  await dialog2.getByRole('button', { name: '开始上传' }).click();
+
+  // 重复文件确认框：更新为新版本
+  await page.getByRole('button', { name: '更新为新版本' }).click();
+  await expect(page.getByText('已更新为新版本')).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator('.el-table__row', { hasText: title })).toHaveCount(1);
 });
 
 test('L0 失败注入冒烟（teardown 清理验证专用）', { tag: ['L0', 'affects:infra'] }, async () => {

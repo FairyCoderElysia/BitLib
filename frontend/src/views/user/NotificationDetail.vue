@@ -60,19 +60,23 @@ const detail = ref(null)
 const loading = ref(false)
 const marking = ref(false)
 const loadError = ref(false)
+let detailSeq = 0 // 请求序号：快速切换通知时丢弃过期响应（与 DocumentDetail 同款防护）
 
 async function fetchDetail() {
+  const seq = ++detailSeq
   loading.value = true
   loadError.value = false
   detail.value = null
   try {
     const n = await notifApi.detail(notificationId.value)
+    if (seq !== detailSeq) return // 过期响应丢弃
     detail.value = n
   } catch (e) {
+    if (seq !== detailSeq) return
     loadError.value = true
     /* 拦截器已提示具体错误 */
   } finally {
-    loading.value = false
+    if (seq === detailSeq) loading.value = false
   }
 }
 

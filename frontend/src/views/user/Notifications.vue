@@ -28,6 +28,7 @@
             <p class="notif-content">{{ n.content }}</p>
             <div class="notif-meta">
               <span>{{ formatTime(n.created_at) }}</span>
+              <span v-if="deptLabel(n)" class="dept-label">{{ deptLabel(n) }}</span>
               <span v-if="n.document_id" class="doc-link">关联文档可查看</span>
             </div>
           </div>
@@ -111,6 +112,13 @@ function onPageChange(p) {
   fetchList()
 }
 
+/** 推送目标部门展示：多部门 join；空=全员 */
+function deptLabel(n) {
+  const depts = n.departments || []
+  if (!depts.length) return ''
+  return depts.map((d) => d.name).join('、')
+}
+
 onMounted(fetchList)
 </script>
 
@@ -185,6 +193,10 @@ onMounted(fetchList)
 
 .doc-link {
   color: var(--brand);
+}
+
+.dept-label {
+  color: var(--ink-500);
 }
 
 .pagination-wrap {
