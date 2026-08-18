@@ -26,6 +26,7 @@ const routes = [
       { path: 'qa', name: 'qa', component: () => import('@/views/user/QA.vue') },
       { path: 'my-uploads', name: 'my-uploads', component: () => import('@/views/user/MyUploads.vue') },
       { path: 'notifications', name: 'notifications', component: () => import('@/views/user/Notifications.vue') },
+      { path: 'notifications/:id', name: 'notification-detail', component: () => import('@/views/user/NotificationDetail.vue') },
     ],
   },
   // 管理端（Sprint 5b）：admin / dept_admin，默认跳工作台

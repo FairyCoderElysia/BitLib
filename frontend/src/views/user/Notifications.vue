@@ -79,14 +79,9 @@ async function fetchList() {
   }
 }
 
-/** 点击：未读先标已读，有关联文档则跳转详情 */
-async function handleClick(n) {
-  if (!n.is_read) {
-    await markRead(n)
-  }
-  if (n.document_id) {
-    router.push(`/documents/${n.document_id}`)
-  }
+/** 点击通知行：进入通知详情页（不自动标已读、不直接跳转关联文档） */
+function handleClick(n) {
+  router.push(`/notifications/${n.id}`)
 }
 
 async function markRead(n) {
@@ -98,11 +93,6 @@ async function markRead(n) {
   } catch (e) {
     /* 拦截器已提示 */
   }
-}
-
-async function handleRead(n) {
-  await markRead(n)
-  if (n.document_id) router.push(`/documents/${n.document_id}`)
 }
 
 async function handleReadAll() {

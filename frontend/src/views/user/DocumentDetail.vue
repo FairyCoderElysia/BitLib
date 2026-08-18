@@ -119,12 +119,13 @@
           <el-empty v-else-if="detail.status !== 'approved'" description="文档当前不可预览（仅已通过审批的文档可预览）" />
         </div>
 
-        <!-- 相关推荐（F18）：approved 请求中显示 loading；有推荐时展示，点击跳转目标详情 -->
-        <div v-if="related.length || relatedLoading" class="preview related-block" v-loading="relatedLoading">
+        <!-- 相关推荐（F18/S8）：approved 始终渲染区块；请求中显示 loading，空结果显示“暂无相关推荐” -->
+        <div v-if="detail.status === 'approved'" class="preview related-block" v-loading="relatedLoading">
           <div class="preview-title">
             <el-icon><Connection /></el-icon>&nbsp;相关推荐
           </div>
-          <div class="related-list">
+          <el-empty v-if="!relatedLoading && !related.length" description="暂无相关推荐" />
+          <div v-else class="related-list">
             <div v-for="item in related" :key="item.id" class="related-card" @click="goDoc(item.id)">
               <div class="related-line">
                 <span class="related-title">{{ item.title }}</span>

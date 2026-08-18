@@ -239,6 +239,224 @@ test('L1 多部门可见：普通用户多部门上传 → 审批 → 两部门�
   expect(idsZ).not.toContain(documentId);
 });
 
+
+
+test('L1 通知详情页：点击进入详情不自动已读，标为已读并跳转关联文档', { tag: ['L1', 'affects:notifications,documents'] }, async ({ request, page }) => {
+  const unique = Date.now();
+  const username = `e2e_notif_${unique}`;
+  const userPassword = 'User@123456';
+  const docTitle = `通知关联文档_${unique}`;
+  const notifTitle = `通知详情回归_${unique}`;
+  const notifTitleNoDoc = `无关联通知_${unique}`;
+  const notifContent = `这是通知详情页回归验证的完整正文_${unique}。用于验证点击通知行进入详情页、不自动标已读、手动标为已读以及跳转关联文档。`;
+
+  // ---------- API 准备：管理员建用户、用户上传文档、管理员发两条通知 ----------
+  const adminLogin = await request.post(`${API}/auth/login`, {
+    data: { username: 'admin', password: adminPassword },
+  });
+  expect(adminLogin.status()).toBe(200);
+  const adminToken = (await adminLogin.json()).data.token;
+  const adminHeaders = { Authorization: `Bearer ${adminToken}` };
+
+  const deptRes = await request.get(`${API}/auth/departments`, { headers: adminHeaders });
+  expect(deptRes.status()).toBe(200);
+  const deptId = (await deptRes.json()).data[0].id;
+
+  const createRes = await request.post(`${API}/admin/users`, {
+    headers: adminHeaders,
+    data: { username, password: userPassword, role: 'user', department_id: deptId },
+  });
+  expect(createRes.status()).toBe(200);
+  expect((await createRes.json()).code).toBe(0);
+
+  const userLogin = await request.post(`${API}/auth/login`, {
+    data: { username, password: userPassword },
+  });
+  expect(userLogin.status()).toBe(200);
+  const userToken = (await userLogin.json()).data.token;
+  const userHeaders = { Authorization: `Bearer ${userToken}` };
+
+  const uploadRes = await request.post(`${API}/documents/upload`, {
+    headers: userHeaders,
+    multipart: {
+      file: {
+        name: 'notif-related.txt',
+        mimeType: 'text/plain',
+        buffer: Buffer.from(`通知关联文档内容_${unique}`, 'utf-8'),
+      },
+      title: docTitle,
+    },
+  });
+  expect(uploadRes.status()).toBe(200);
+  const uploadBody = await uploadRes.json();
+  expect(uploadBody.code).toBe(0);
+  const documentId = uploadBody.data.id;
+
+  const pushRes = await request.post(`${API}/admin/push`, {
+    headers: adminHeaders,
+    data: { title: notifTitle, content: notifContent, document_id: documentId, department_id: deptId },
+  });
+  expect(pushRes.status()).toBe(200);
+  const notificationId = (await pushRes.json()).data.id;
+
+  const pushNoDocRes = await request.post(`${API}/admin/push`, {
+    headers: adminHeaders,
+    data: { title: notifTitleNoDoc, content: `无关联通知正文_${unique}`, department_id: deptId },
+  });
+  expect(pushNoDocRes.status()).toBe(200);
+  const notificationNoDocId = (await pushNoDocRes.json()).data.id;
+
+  // ---------- UI：普通用户登录进入通知中心 ----------
+  await page.goto(`${WEB}/login`);
+  await page.getByLabel('账号').fill(username);
+  await page.getByLabel('密码').fill(userPassword);
+  await page.getByRole('button', { name: '登 录' }).click();
+  await expect(page).toHaveURL(/search/);
+
+  await page.goto(`${WEB}/notifications`);
+  await expect(page.getByText('通知中心')).toBeVisible();
+
+  // F1-6：列表页“标为已读”按钮保留，且点击按钮不触发行跳转
+  const rowNoDoc = page.locator('.notif-item', { hasText: notifTitleNoDoc });
+  await expect(rowNoDoc).toBeVisible();
+  await rowNoDoc.getByRole('button', { name: '标为已读' }).click();
+  await expect(page).toHaveURL(/notifications$/);
+  await expect(rowNoDoc.locator('.el-tag', { hasText: '未读' })).toHaveCount(0);
+
+  // F1-1/F1-2：点击通知行进入详情页，不自动标已读
+  const rowWithDoc = page.locator('.notif-item', { hasText: notifTitle });
+  await expect(rowWithDoc).toBeVisible();
+  await rowWithDoc.locator('.notif-main').click();
+  await expect(page).toHaveURL(new RegExp(`/notifications/${notificationId}$`));
+
+  // F1-3：详情页完整展示标题、正文、发送时间与未读状态
+  await expect(page.getByRole('heading', { name: notifTitle })).toBeVisible();
+  await expect(page.getByText(notifContent)).toBeVisible();
+  await expect(page.getByText(/发送时间：/)).toBeVisible();
+  await expect(page.locator('.el-tag', { hasText: '未读' })).toBeVisible();
+  const beforeRead = await request.get(`${API}/notifications/${notificationId}`, { headers: userHeaders });
+  expect(beforeRead.status()).toBe(200);
+  expect((await beforeRead.json()).data.is_read).toBe(false);
+
+  // F1-5：详情页标为已读，状态持久化到后端
+  await page.getByRole('button', { name: '标为已读' }).click();
+  await expect(page.locator('.el-tag', { hasText: '已读' })).toBeVisible();
+  const afterRead = await request.get(`${API}/notifications/${notificationId}`, { headers: userHeaders });
+  expect(afterRead.status()).toBe(200);
+  expect((await afterRead.json()).data.is_read).toBe(true);
+
+  // F1-4：有关联文档时显示“查看关联文档”并跳转；无关联文档不显示该入口
+  await page.getByRole('button', { name: '查看关联文档' }).click();
+  await expect(page).toHaveURL(new RegExp(`/documents/${documentId}$`));
+  await expect(page.getByRole('heading', { name: docTitle })).toBeVisible();
+
+  await page.goto(`${WEB}/notifications/${notificationNoDocId}`);
+  await expect(page.getByRole('heading', { name: notifTitleNoDoc })).toBeVisible();
+  await expect(page.getByRole('button', { name: '查看关联文档' })).toHaveCount(0);
+});
+
+test('L1 文档详情相关推荐：approved 始终渲染区块，空态或推荐卡片可见', { tag: ['L1', 'affects:documents,related'] }, async ({ request, page }) => {
+  const unique = Date.now();
+  const username = `e2e_rel_${unique}`;
+  const userPassword = 'User@123456';
+  const docTitle = `推荐回归文档_${unique}`;
+  const docTitle2 = `推荐回归文档2_${unique}`;
+  const pendingTitle = `推荐回归待审_${unique}`;
+  const docContent = `推荐回归唯一内容串${unique}。用于验证文档详情页相关推荐区块在 approved 文档中始终可见，并展示空态或推荐卡片。`.repeat(30);
+
+  // ---------- API 准备：管理员直入库两篇 approved 文档 + 建同部门普通用户 ----------
+  const adminLogin = await request.post(`${API}/auth/login`, {
+    data: { username: 'admin', password: adminPassword },
+  });
+  expect(adminLogin.status()).toBe(200);
+  const adminToken = (await adminLogin.json()).data.token;
+  const adminHeaders = { Authorization: `Bearer ${adminToken}` };
+
+  const deptRes = await request.get(`${API}/auth/departments`, { headers: adminHeaders });
+  expect(deptRes.status()).toBe(200);
+  const deptId = (await deptRes.json()).data[0].id;
+
+  const createRes = await request.post(`${API}/admin/users`, {
+    headers: adminHeaders,
+    data: { username, password: userPassword, role: 'user', department_id: deptId },
+  });
+  expect(createRes.status()).toBe(200);
+  expect((await createRes.json()).code).toBe(0);
+
+  const userLogin = await request.post(`${API}/auth/login`, {
+    data: { username, password: userPassword },
+  });
+  expect(userLogin.status()).toBe(200);
+  const userToken = (await userLogin.json()).data.token;
+  const userHeaders = { Authorization: `Bearer ${userToken}` };
+
+  const uploadApproved = async (title, filename) => {
+    const r = await request.post(`${API}/admin/documents/upload`, {
+      headers: adminHeaders,
+      multipart: {
+        file: {
+          name: filename,
+          mimeType: 'text/plain',
+          buffer: Buffer.from(`${title}-${docContent}`, 'utf-8'),
+        },
+        title,
+        department_id: String(deptId),
+      },
+    });
+    expect(r.status()).toBe(200);
+    const body = await r.json();
+    expect(body.code).toBe(0);
+    expect(body.data.status).toBe('approved');
+    return body.data.id;
+  };
+
+  const documentId = await uploadApproved(docTitle, 'related-regression.txt');
+  await uploadApproved(docTitle2, 'related-regression-2.txt');
+
+  // F2-4 准备：同用户上传一篇 pending 文档
+  const pendingUpload = await request.post(`${API}/documents/upload`, {
+    headers: userHeaders,
+    multipart: {
+      file: {
+        name: 'related-pending.txt',
+        mimeType: 'text/plain',
+        buffer: Buffer.from(`${pendingTitle}-${docContent}`, 'utf-8'),
+      },
+      title: pendingTitle,
+    },
+  });
+  expect(pendingUpload.status()).toBe(200);
+  const pendingBody = await pendingUpload.json();
+  expect(pendingBody.code).toBe(0);
+  expect(pendingBody.data.status).toBe('pending');
+  const pendingId = pendingBody.data.id;
+
+  // ---------- UI：普通用户查看 approved 文档详情 ----------
+  await page.goto(`${WEB}/login`);
+  await page.getByLabel('账号').fill(username);
+  await page.getByLabel('密码').fill(userPassword);
+  await page.getByRole('button', { name: '登 录' }).click();
+  await expect(page).toHaveURL(/search/);
+
+  // F2-1：approved 文档详情始终渲染“相关推荐”区块
+  await page.goto(`${WEB}/documents/${documentId}`);
+  await expect(page.getByRole('heading', { name: docTitle })).toBeVisible();
+  const block = page.locator('.related-block');
+  await expect(block).toBeVisible();
+  await expect(block.getByText('相关推荐')).toBeVisible();
+
+  // F2-2/F2-3：等待推荐请求完成，空态或推荐卡片二者至少其一可见
+  await expect(block.locator('.related-card, .el-empty').first()).toBeVisible({ timeout: 30_000 });
+  const hasCard = await block.locator('.related-card').first().isVisible().catch(() => false);
+  const hasEmpty = await block.getByText('暂无相关推荐').isVisible().catch(() => false);
+  expect(hasCard || hasEmpty).toBeTruthy();
+
+  // F2-4：非 approved 文档不渲染推荐区块
+  await page.goto(`${WEB}/documents/${pendingId}`);
+  await expect(page.getByRole('heading', { name: pendingTitle })).toBeVisible();
+  await expect(page.locator('.related-block')).toHaveCount(0);
+});
+
 test('L0 失败注入冒烟（teardown 清理验证专用）', { tag: ['L0', 'affects:infra'] }, async () => {
   base.skip(process.env.EDMS_E2E_FORCE_FAIL !== '1', '未设置 EDMS_E2E_FORCE_FAIL，跳过失败注入');
   expect(1).toBe(2);

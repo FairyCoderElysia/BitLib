@@ -229,6 +229,9 @@ export const favApi = {
 export const notifApi = {  list(params) {
     return unwrap(http.get('/notifications', { params }))
   },
+  detail(id) {
+    return unwrap(http.get(`/notifications/${id}`))
+  },
   markRead(id) {
     return unwrap(http.post(`/notifications/${id}/read`))
   },
