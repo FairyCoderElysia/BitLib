@@ -2,7 +2,7 @@
 
 > 一款可本地私有化部署的中小企业内部**文档管理与 AI 知识库平台**：把散落在员工电脑、网盘中的业务文档统一收拢到私有企业知识库，提供**全文检索、在线预览下载、收藏管理、AI 问答**，并通过**审批流 + 三级角色 + 部门隔离**保证资料安全、可控地流转。
 >
-> 亮点：混合检索（关键词 + 语义双路，RRF 融合 + CrossEncoder 重排）、父子分片 small-to-big 超长文档 RAG、召回阶段权限过滤、双模式 LLM/Embedding 私有化适配、Scrapling 爬虫自动扩充知识库、数据不出内网。
+> 亮点：混合检索（关键词 + 语义双路，RRF 融合 + CrossEncoder 重排）、父子分片 small-to-big 超长文档 RAG、召回阶段权限过滤、文档/爬虫/推送多部门可见、双模式 LLM/Embedding 私有化适配、Scrapling 爬虫自动扩充知识库、数据不出内网。
 
 ---
 
@@ -15,16 +15,16 @@
 - **资料收藏**：个人收藏夹分类管理（新建/重命名/删除），同文档收藏幂等；文档下架/删除后条目显示"已失效"；
 - **AI 问答（RAG）**：自然语言提问 → 混合检索（权限过滤）→ 回溯 parent 上下文块 → LLM 生成，回答**附引用来源**（标题 + 片段 + 点击跳转原文），找不到可信答案时明确提示不编造；
 - **我的上传**：上传记录 + 审批状态（待审批/通过/被拒含原因/失败）+ 撤回待审批文档；
-- **通知中心**：管理员部门定向推送，顶栏未读角标（30s 轮询），单条/全部已读，关联文档跳转。
+- **通知中心**：管理员可多部门定向推送；用户点击通知进入**通知详情页**，详情页内可标为已读、跳转关联文档；顶栏未读角标（30s 轮询），单条/全部已读。
 
 ### 1.2 管理端（管理员 / 部门管理员）
 
 - **工作台**：文档数 / 待审批 / 爬虫状态 / 部门用户数 / 近 7 日趋势统计；
 - **审批中心**：待审批列表 + 原文预览 + 单条/批量通过·拒绝（附原因），部门管理员仅见本部门待审；
-- **文档管理**：批量上传**直接入库**（跳过审批）、列表筛选（状态/部门/来源/格式/重点）、重点标记、改部门、下架/上架、重新入库（failed/offline 重试）、删除；
-- **爬虫任务**：配置起始 URL / 域名白名单（SSRF 防护）/ 深度 / 正文选择器 / cron，启停 + 手动执行 + 运行记录；
+- **文档管理**：批量上传**直接入库**（跳过审批）、列表筛选（状态/部门/来源/格式/重点）、重点标记、**多部门改部门**、下架/上架、重新入库（failed/offline 重试）、删除；
+- **爬虫任务**：配置起始 URL / 域名白名单（SSRF 防护）/ 深度 / 正文选择器 / cron，启停 + 手动执行 + 运行记录；目标部门可**多选**（空=公开），抓取入库文档继承任务目标部门集合；
 - **用户管理**：仅管理员建号（角色/部门/重置密码/删除）；
-- **部门推送**：定向到部门或全员，可关联文档；
+- **部门推送**：定向到**多个部门**或全员，可关联文档；
 - **审计日志**：关键操作全量记录（操作人/对象/IP/时间），可按动作/对象/时间筛选。
 
 ### 1.3 AI 知识库
@@ -37,7 +37,7 @@
 
 - **搜索热词与联想**：基于 SearchLog 聚合热词榜（jieba 分词 + 停用词过滤，点击即搜）+ 输入联想下拉（可见性隔离、防抖、缓存）；
 - **文档智能摘要**：入库时 LLM 生成 1-3 句摘要（失败降级为开头片段截取，绝不阻塞入库），检索卡片与详情页展示；管理端可单文档重新生成；
-- **相似文档推荐**：文档级向量（child 平均 + L2 归一化）最近邻检索，详情页“相关推荐”区块，权限过滤 + 排除自身；
+- **相似文档推荐**：文档级向量（child 平均 + L2 归一化）最近邻检索，详情页“相关推荐”区块（无结果时显示“暂无相关推荐”），权限过滤 + 排除自身；
 - **爬虫增量更新**：URL + 内容 sha256 双判据——内容不变跳过 / 同 URL 变化**更新原文档**（保留 id，替换分块与向量）/ 新页面新增，运行记录区分 新增/更新/跳过；
 - **批量下载**：收藏页多选打包 zip（流式、≤50、不可见文档自动剔除并提示，含 manifest.txt），搜索页不提供勾选；
 - **问答会话历史**：会话列表/消息历史/续接/删除单条/清空全部，仅本人可见。
@@ -119,6 +119,7 @@ E:\毕业论文\
 │  │  ├─ parsers.py / cleaning.py / chunker.py / ingest.py / fts.py
 │  │  ├─ embeddings.py / vector_store.py / rerank.py / llm.py / rag.py
 │  │  ├─ search_service.py / visibility.py / cache.py
+│  │  ├─ document_departments.py / crawl_task_departments.py / push_notification_departments.py
 │  │  ├─ crawler.py / scheduler.py
 │  │  └─ routers/             # auth/documents/admin/search/qa/favorites/crawl/notifications
 │  ├─ scripts/
@@ -126,6 +127,9 @@ E:\毕业论文\
 │  │  ├─ test_m3.py           # M3 解析入库管线（8 断言）
 │  │  ├─ test_m4.py           # M4 检索+RAG+收藏（9 断言）
 │  │  ├─ test_m5.py           # M5 爬虫+推送+审计（6 断言）
+│  │  ├─ test_m12_fixes.py     # M12 认证/上传/批量审批修复
+│  │  ├─ test_s5_qa.py         # S5 QA 回归
+│  │  ├─ test_s7_multidept.py  # S7 多部门可见回归
 │  │  ├─ seed_demo.py         # 演示数据种子（Evaluator E2E 用）
 │  │  ├─ start.bat            # Windows 一键启动后端
 │  │  └─ backup.py            # data/ 备份脚本
@@ -139,6 +143,7 @@ E:\毕业论文\
 │  │  ├─ components/          # PreviewDocument（pdf/docx/txt 三格式预览）
 │  │  ├─ api/ · stores/ · router/ · utils/ · styles/ · layout/
 │  ├─ package.json            # vite build；开发 proxy /api → localhost:8000
+│  ├─ e2e/                    # Playwright E2E 回归（自包含启动/数据隔离/自动清理）
 │  └─ dist/                   # 前端构建产物（生产部署用）
 ├─ contracts/                 # 各里程碑契约与交付摘要
 ├─ eval-reports/              # Evaluator 评估报告
@@ -229,37 +234,26 @@ npm run dev
 
 ## 6. 测试
 
-十套后端自动化测试（TestClient + assert），各自使用独立测试库（`data/test_*/`，含独立 CHROMA_DIR 隔离向量库），运行结束自动清理，**不污染正式数据**：
+13 套后端自动化测试（TestClient + assert），各自使用独立测试库（`data/test_*/`，含独立 CHROMA_DIR 隔离向量库），运行结束自动清理，**不污染正式数据**：
 
 ```bat
 cd backend
-python scripts\test_m1m2.py    REM M1+M2 认证/角色/上传审批流 —— 21 断言
-python scripts\test_m3.py      REM M3 解析入库管线（4格式/清洗/分块/向量/FTS/超长/重试）—— 8 断言
-python scripts\test_m4.py      REM M4 混合检索/RAG/收藏/缓存 —— 9 断言
-python scripts\test_m5.py      REM M5 爬虫/推送/审计/统计 —— 6 断言
-python scripts\test_m6.py      REM M6 热词/联想/缓存失效 —— 10 断言
-python scripts\test_m7.py      REM M7 智能摘要（降级/展示）—— 8 断言
-python scripts\test_m8.py      REM M8 爬虫增量（新增/跳过/更新）—— 6 断言
-python scripts\test_m9.py      REM M9 相似推荐/权限/性能 —— 7 断言
-python scripts\test_m10.py     REM M10 批量下载（剔除/审计/manifest）—— 10 断言
-python scripts\test_m11.py     REM M11 评估优化（FTS同步/缓存/断句/清理）—— 11 断言
+python scripts	est_m1m2.py    REM M1+M2 认证/角色/上传审批流 —— 22 断言
+python scripts	est_m3.py      REM M3 解析入库管线 —— 8 断言
+python scripts	est_m4.py      REM M4 混合检索/RAG/收藏/缓存 —— 9 断言
+python scripts	est_m5.py      REM M5 爬虫/推送/审计/统计 —— 6 断言
+python scripts	est_m6.py      REM M6 热词/联想/缓存失效 —— 10 断言
+python scripts	est_m7.py      REM M7 智能摘要 —— 8 断言
+python scripts	est_m8.py      REM M8 爬虫增量 —— 6 断言
+python scripts	est_m9.py      REM M9 相似推荐/权限/性能 —— 7 断言
+python scripts	est_m10.py     REM M10 批量下载 —— 10 断言
+python scripts	est_m11.py     REM M11 评估优化 —— 11 断言
+python scripts	est_m12_fixes.py  REM M12 认证/上传/批量审批修复 —— 24 断言
+python scripts	est_s5_qa.py   REM S5 QA parent 回溯/多轮上下文/寒暄 —— 16 断言
+python scripts	est_s7_multidept.py REM S7 文档/爬虫/推送多部门可见 —— 30 断言
 ```
 
-**合计 96 断言，全部 PASS**；另有 `python scripts\seed_demo.py` 播种演示数据、`python scripts\rebuild_index.py` 重建向量索引（运维）。评估结论：**Evaluator 各 Sprint 均 PASS**（前端 8.9/10，P2 各 7.0~7.4，见 `eval-reports/`），前端经 Playwright E2E 全流程实测（登录 → 检索 → 预览 → 收藏 → 审批 → 热词 → 联想 → 摘要 → 推荐 → 批量下载）。
-
-### 6.1 Playwright E2E 回归（S2）
-
-**安装**：`cd frontend && npm install`（已包含 `@playwright/test`；浏览器优先使用系统 Edge/Chrome，不下载 Playwright 浏览器二进制）。
-
-**运行**：`cd frontend && npm run test:e2e`
-
-- **自包含启动**：该命令会自行启动测试后端（uvicorn，`127.0.0.1:8000`）与前端（Vite，`127.0.0.1:5173`），运行前无需人工预启动服务；测试结束后自动停止前后端进程。
-- **数据隔离**：启动器显式设置 `DATABASE_URL`、`UPLOAD_DIR`、`CHROMA_DIR` 指向系统临时目录下统一前缀 `edms-e2e-` 的独立测试数据目录，不读写正式 `backend/data`。三个实际生效路径会在启动后端前打印到 stdout，并写入 `frontend/e2e/.run-env.json`（该文件本地保留，不入库）。
-- **自动清理**：无论用例 PASS 还是 FAIL，teardown 都会清理测试数据根目录，不残留测试数据库/上传文件/向量库。可用 `EDMS_E2E_FORCE_FAIL=1 npm run test:e2e` 验证 FAIL 分支清理仍生效。
-- **前置条件**：启动器显式设置 `ADMIN_INITIAL_PASSWORD=Admin@123456`，不依赖 `backend/.env`；后端依赖已安装（见 §4.1），本地 embedding 模型已缓存（或首次运行可下载）。
-- **失败注入**：`EDMS_E2E_FORCE_FAIL=1` 时，专用 smoke 用例必定失败，用于验证 teardown 清理。
-
----
+**合计 167 断言，全部 PASS**；另有 `python scripts\seed_demo.py` 播种演示数据、`python scripts\rebuild_index.py` 重建向量索引（运维）（运维）。评估结论：**Evaluator 各 Sprint 均 PASS**，前端经 Playwright E2E 全流程实测（登录 → 检索 → 预览 → 收藏 → 审批 → 热词 → 联想 → 摘要 → 推荐 → 批量下载 → 多部门上传/审批/检索 → 通知详情 → 重复文件更新）。
 
 ## 7. 部署
 
@@ -354,6 +348,7 @@ EMBEDDING_DIM=1536              # 必须与向量库现有维度一致！
 
 ## 9. 常见问题（FAQ）
 
+0. **首次搜索/问答较慢**：本地 embedding/reranker 模型首次加载约 15~30 秒，属正常冷启动；后端启动时会后台预热。若模型已缓存但加载仍触发 HuggingFace 网络重试，请在启动后端前设置 `HF_HUB_OFFLINE=1`（PowerShell：`$env:HF_HUB_OFFLINE="1"`；Git Bash：`export HF_HUB_OFFLINE=1`）。
 1. **Redis 未安装 / 未配置**：`REDIS_URL` 留空即可，热点搜索缓存自动降级为内存 TTL 缓存，功能不受影响。
 2. **embedding 模型下载失败**：首次使用 `EMBEDDING_MODE=local` 时会自动下载 `BAAI/bge-small-zh-v1.5`（约 100MB），需联网；离线环境可预先把模型放入 HuggingFace 缓存目录后设置 `HF_HUB_OFFLINE=1`。
 3. **重排模型体积大 / 不需要**：`RERANKER_ENABLED=false` 可关闭 CrossEncoder（跳过 ~1.1GB 模型下载），检索在 RRF 融合后直接取 top5。
